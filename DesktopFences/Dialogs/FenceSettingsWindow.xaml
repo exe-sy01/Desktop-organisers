@@ -1,0 +1,45 @@
+<Window x:Class="DesktopFences.Dialogs.FenceSettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Customize fence" Width="440" SizeToContent="Height" ResizeMode="NoResize" Topmost="True"
+        WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" FontSize="13">
+    <StackPanel Margin="18">
+        <TextBlock Text="Name" Style="{StaticResource SectionHeader}" />
+        <TextBox x:Name="TitleBox" Padding="4,3" Margin="0,0,0,14" TextChanged="OnChanged" />
+
+        <TextBlock Text="Colour" Style="{StaticResource SectionHeader}" />
+        <WrapPanel x:Name="Swatches" Margin="0,2,0,6" />
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
+            <TextBlock Text="Hex" VerticalAlignment="Center" Margin="0,0,8,0" />
+            <TextBox x:Name="HexBox" Width="110" Padding="4,3" TextChanged="OnChanged" />
+        </StackPanel>
+
+        <TextBlock Style="{StaticResource SectionHeader}">
+            <Run Text="Background opacity" />
+            <Run x:Name="OpacityLabel" FontWeight="Normal" />
+        </TextBlock>
+        <Slider x:Name="OpacitySlider" Minimum="0" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True"
+                Margin="0,0,0,14" ValueChanged="OnChanged" />
+
+        <StackPanel x:Name="RulesPanel">
+            <TextBlock Text="Auto-capture new desktop items" Style="{StaticResource SectionHeader}" />
+            <TextBlock Style="{StaticResource Hint}"
+                       Text="New files that land on the desktop with these extensions go straight into this fence. Comma separated, e.g. .lnk, .url — use * to catch anything no other fence claims." />
+            <TextBox x:Name="RulesBox" Padding="4,3" Margin="0,6,0,6" />
+            <CheckBox x:Name="FoldersCheck" Content="Also capture new folders" Margin="0,0,0,14" />
+        </StackPanel>
+
+        <StackPanel x:Name="PortalPanel">
+            <TextBlock Text="Folder shown in this portal" Style="{StaticResource SectionHeader}" />
+            <DockPanel Margin="0,0,0,14">
+                <Button Content="Browse…" DockPanel.Dock="Right" Margin="6,0,0,0" Padding="10,2" Click="Browse_Click" />
+                <TextBox x:Name="PortalBox" Padding="4,3" />
+            </DockPanel>
+        </StackPanel>
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">
+            <Button Content="OK" IsDefault="True" Style="{StaticResource DialogButton}" Click="Ok_Click" />
+            <Button Content="Cancel" IsCancel="True" Style="{StaticResource DialogButton}" />
+        </StackPanel>
+    </StackPanel>
+</Window>

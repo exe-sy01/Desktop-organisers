@@ -1,0 +1,39 @@
+<Window x:Class="DesktopFences.Dialogs.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Desktop Fences – Settings" Width="460" SizeToContent="Height" ResizeMode="NoResize" Topmost="True"
+        WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" FontSize="13">
+    <StackPanel Margin="18">
+        <TextBlock Text="Behaviour" Style="{StaticResource SectionHeader}" />
+        <CheckBox x:Name="HideIcons" Content="Hide fenced icons from the bare desktop" Margin="0,4" />
+        <TextBlock x:Name="HiddenFilesWarning" Style="{StaticResource Hint}" Margin="22,0,0,4" Foreground="#B05A00"
+                   Visibility="Collapsed"
+                   Text="Explorer is set to show protected operating system files, so fenced icons will still appear (faded) on the desktop. Re-tick 'Hide protected operating system files' in Explorer's Folder Options to hide them fully." />
+        <CheckBox x:Name="HidePublic" Margin="22,2,0,4"
+                  Content="Also hide shortcuts on the shared Public Desktop (asks for admin permission)" />
+        <CheckBox x:Name="DoubleClick" Content="Double-click empty desktop space to hide / show fences" Margin="0,4" />
+        <CheckBox x:Name="Snap" Content="Snap fences to screen edges and each other (hold Alt to skip)" Margin="0,4" />
+        <CheckBox x:Name="Startup" Content="Start with Windows" Margin="0,4,0,14" />
+
+        <TextBlock Text="Look" Style="{StaticResource SectionHeader}" />
+        <StackPanel Orientation="Horizontal" Margin="0,4,0,14">
+            <TextBlock Text="Icon size" VerticalAlignment="Center" Margin="0,0,10,0" />
+            <ComboBox x:Name="IconSize" Width="140">
+                <ComboBoxItem Content="Small (32)" Tag="32" />
+                <ComboBoxItem Content="Medium (48)" Tag="48" />
+                <ComboBoxItem Content="Large (64)" Tag="64" />
+                <ComboBoxItem Content="Extra large (80)" Tag="80" />
+            </ComboBox>
+        </StackPanel>
+
+        <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,4">
+            <Run Text="Settings and fences are stored in" />
+            <Run x:Name="ConfigPath" />
+        </TextBlock>
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="OK" IsDefault="True" Style="{StaticResource DialogButton}" Click="Ok_Click" />
+            <Button Content="Cancel" IsCancel="True" Style="{StaticResource DialogButton}" />
+        </StackPanel>
+    </StackPanel>
+</Window>
