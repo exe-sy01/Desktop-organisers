@@ -28,6 +28,12 @@ On the first run, it offers to sort your desktop into fences automatically.
 | **Show desktop** | Fences stay visible after Win+D. |
 | **Start with Windows** | Turn it on in the tray menu under Settings. |
 
+
+## Preview of settings
+
+<img width="1147" height="712" alt="Screenshot_31" src="https://github.com/user-attachments/assets/00a14b5a-096c-4e39-b9d2-e72e51cc6fa7" />
+
+
 ## How hiding works
 
 Nothing is moved or deleted. A file you put in a fence gets the *Hidden + System* attributes. Explorer then keeps it off the bare desktop, even when "Show hidden items" is on. System icons like the Recycle Bin use Explorer's own "hide desktop icon" setting instead.
