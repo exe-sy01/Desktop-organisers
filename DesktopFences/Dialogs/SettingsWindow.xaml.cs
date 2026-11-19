@@ -46,8 +46,14 @@ public partial class SettingsWindow : Window
 
         // Personalization
         ColorTarget.Items.Add(new ComboBoxItem { Content = "All fences" });
+        var listedGroups = new HashSet<string>();
         foreach (var w in mgr.Windows)
-            ColorTarget.Items.Add(new ComboBoxItem { Content = w.Config.Title, Tag = w });
+        {
+            // A tab group shares one look, so it's listed once ("Work + Media").
+            if (w.Config.GroupId != null && !listedGroups.Add(w.Config.GroupId)) continue;
+            var title = w.Config.GroupId == null ? w.Config.Title : string.Join(" + ", mgr.GroupMembers(w).Select(m => m.Config.Title));
+            ColorTarget.Items.Add(new ComboBoxItem { Content = title, Tag = w });
+        }
         ColorTarget.SelectedIndex = 0;
 
         TintIcons.IsChecked = _s.TintIcons;
@@ -108,8 +114,9 @@ public partial class SettingsWindow : Window
 
     // ------------------------------------------------------------------ background colour (live preview)
 
+    // One fence means its whole tab group: tabs always share a look.
     IEnumerable<FenceWindow> ColorTargets() =>
-        (ColorTarget.SelectedItem as ComboBoxItem)?.Tag is FenceWindow w ? new[] { w } : _mgr.Windows;
+        (ColorTarget.SelectedItem as ComboBoxItem)?.Tag is FenceWindow w ? _mgr.GroupMembers(w) : _mgr.Windows;
 
     void ColorTarget_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {

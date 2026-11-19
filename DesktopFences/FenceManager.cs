@@ -357,7 +357,28 @@ public sealed class FenceManager
             }
             var active = list.FirstOrDefault(f => f.ActiveTab) ?? list[0];
             foreach (var f in list) f.ActiveTab = f == active;
+            foreach (var f in list.Skip(1)) CopyLook(list[0], f); // tabs share the first tab's look
         }
+    }
+
+    /// <summary>Colour, opacity and text colour – what makes tabs of one group look like one fence.</summary>
+    static void CopyLook(FenceConfig from, FenceConfig to)
+    {
+        to.TintColor = from.TintColor;
+        to.Opacity = from.Opacity;
+        to.TextColor = from.TextColor;
+    }
+
+    /// <summary>After one tab's look changed (Customize…, colour sliders), give every tab in its group the same look.</summary>
+    public void SyncGroupLook(FenceWindow source)
+    {
+        foreach (var m in GroupMembers(source).Where(m => m != source))
+        {
+            CopyLook(source.Config, m.Config);
+            m.ApplyAppearance();
+            if (Config.Settings.TintIcons) m.Refresh(); // icon tint follows the fence colour
+        }
+        Store.SaveSoon();
     }
 
     public void SwitchTab(FenceWindow from, FenceWindow to)
@@ -394,10 +415,12 @@ public sealed class FenceManager
         foreach (var m in targetMembers) { m.Config.GroupId = gid; m.Config.ActiveTab = false; }
         // Put the new tabs right after the target group's last tab.
         int insertAt = Config.Fences.IndexOf(targetMembers[^1].Config) + 1;
+        var firstTab = targetMembers[0].Config;
         foreach (var m in draggedMembers)
         {
             m.Config.GroupId = gid;
             m.Config.ActiveTab = false;
+            CopyLook(firstTab, m.Config); // new tabs take on the group's look
             int i = Config.Fences.IndexOf(m.Config);
             Config.Fences.RemoveAt(i);
             if (i < insertAt) insertAt--;

@@ -141,6 +141,7 @@ public partial class FenceSettingsWindow : Window
         _saved = true;
         _fence.ApplyAppearance();
         _fence.Refresh();
+        _mgr.SyncGroupLook(_fence); // other tabs of this fence get the same look
         _mgr.Store.SaveSoon();
         DialogResult = true;
     }
