@@ -51,6 +51,8 @@ On the first run, it offers to sort your desktop into fences automatically.
 
 | | |
 |---|---|
+| ![General: hiding desktop icons, mouse and keyboard shortcuts, start with Windows, desktop right-click menu](docs/screenshots/settings-general.png) | |
+| **General** – hiding icons, shortcuts, start with Windows, desktop right-click menu | |
 | ![Personalization: background colour sliders, icon tint, blend with wallpaper](docs/screenshots/settings-personalization.png) | ![Rules: sort new icons by type, name, shortcut target, time or size](docs/screenshots/settings-rules.png) |
 | **Personalization** – colours for one fence or all, icon tint, blending, title bars | **Rules** – sort new desktop icons into fences automatically |
 | ![Tabs: create, switch and style tab groups](docs/screenshots/settings-tabs.png) | ![Layout: daily backups, snapping, icon spacing, swap monitors](docs/screenshots/settings-layout.png) |
