@@ -148,6 +148,18 @@ public sealed class FenceManager
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
         StartupHelper.RefreshPathIfEnabled();
+        UpdateDesktopMenu();
+    }
+
+    /// <summary>
+    /// Adds/removes "Desktop Fences settings" in the desktop right-click menu (also refreshes the exe path).
+    /// Only the normal instance does this – not test copies started with --config.
+    /// </summary>
+    void UpdateDesktopMenu()
+    {
+        var defaultDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DesktopFences");
+        if (!string.Equals(Path.GetFullPath(Store.Dir).TrimEnd('\\'), defaultDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) return;
+        DesktopMenuHelper.Set(Config.Settings.DesktopMenuEntry);
     }
 
     void OnDisplaySettingsChanged(object? sender, EventArgs e) =>
@@ -268,6 +280,23 @@ public sealed class FenceManager
 
     public void Quit() => Application.Current.Shutdown();
 
+    Dialogs.SettingsWindow? _settingsWindow;
+
+    /// <summary>Opens Settings (or brings it to the front if it's already open).</summary>
+    public void ShowSettings()
+    {
+        if (_settingsWindow != null)
+        {
+            if (_settingsWindow.WindowState == WindowState.Minimized) _settingsWindow.WindowState = WindowState.Normal;
+            _settingsWindow.Activate();
+            return;
+        }
+        _settingsWindow = new Dialogs.SettingsWindow(this);
+        _settingsWindow.Loaded += (_, _) => _settingsWindow?.Activate();
+        try { _settingsWindow.ShowDialog(); }
+        finally { _settingsWindow = null; }
+    }
+
     public void RestoreIconsAndQuit()
     {
         var r = MessageBox.Show(
@@ -276,6 +305,7 @@ public sealed class FenceManager
             "Desktop Fences", MessageBoxButton.OKCancel, MessageBoxImage.Question);
         if (r != MessageBoxResult.OK) return;
         Hider.Restoring = true; // nothing may be re-hidden from here on
+        DesktopMenuHelper.Set(false); // this is the "before uninstalling" step: leave no menu entry behind
         Hider.UnhideAll();
         Hider.FlushElevatedNow();
         Store.SaveNow();
@@ -947,6 +977,7 @@ public sealed class FenceManager
         }
         ApplyIconSize();
         if (old.HotkeysEnabled != updated.HotkeysEnabled) RegisterHotkeys();
+        if (old.DesktopMenuEntry != updated.DesktopMenuEntry) UpdateDesktopMenu();
         foreach (var w in _windows)
         {
             w.ApplyAppearance();

@@ -35,6 +35,7 @@ public partial class SettingsWindow : Window
         DoubleClick.IsChecked = _s.DoubleClickDesktopToToggle;
         SingleClick.IsChecked = _s.SingleClickToOpen;
         Startup.IsChecked = StartupHelper.IsEnabled;
+        DesktopMenu.IsChecked = _s.DesktopMenuEntry;
         Hotkeys.IsChecked = _s.HotkeysEnabled;
         if (_s.HotkeysEnabled && mgr.HotkeyProblem.Length > 0)
         {
@@ -276,6 +277,7 @@ public partial class SettingsWindow : Window
         s.DoubleClickDesktopToToggle = DoubleClick.IsChecked == true;
         s.SingleClickToOpen = SingleClick.IsChecked == true;
         s.HotkeysEnabled = Hotkeys.IsChecked == true;
+        s.DesktopMenuEntry = DesktopMenu.IsChecked == true;
 
         s.TintIcons = TintIcons.IsChecked == true;
         s.TintSource = Enum.Parse<IconTintSource>(TagOf(TintSource));

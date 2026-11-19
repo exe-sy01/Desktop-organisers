@@ -91,7 +91,12 @@
 
                         <TextBlock Text="Windows" Style="{StaticResource SectionHeader}" />
                         <Border Style="{StaticResource Group}">
-                            <CheckBox x:Name="Startup" Content="Start with Windows" />
+                            <StackPanel>
+                                <CheckBox x:Name="Startup" Content="Start with Windows" />
+                                <CheckBox x:Name="DesktopMenu" Content="Add &quot;Desktop Fences settings&quot; to the desktop's right-click menu" />
+                                <TextBlock Style="{StaticResource Hint}" Margin="22,0,0,0"
+                                           Text="On Windows 11 it's under &quot;Show more options&quot; (or Shift+right-click the desktop)." />
+                            </StackPanel>
                         </Border>
                     </StackPanel>
                 </ScrollViewer>

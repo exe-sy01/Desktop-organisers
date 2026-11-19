@@ -102,6 +102,8 @@ public sealed class AppSettings
     public bool HotkeysEnabled { get; set; } = true;
     /// <summary>How long rolling a fence up or down takes, in milliseconds (0 = instant).</summary>
     public int RollAnimationMs { get; set; } = 300;
+    /// <summary>"Desktop Fences settings" in the desktop's right-click menu.</summary>
+    public bool DesktopMenuEntry { get; set; } = true;
 
     // Personalization
     public TitleBarMode TitleBars { get; set; } = TitleBarMode.Always;

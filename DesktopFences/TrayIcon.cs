@@ -40,7 +40,7 @@ public sealed class TrayIcon : IDisposable
         layouts.DropDownItems.Add("(placeholder)"); // filled when the menu opens
         menu.Items.Add(layouts);
         menu.Items.Add(new WF.ToolStripSeparator());
-        menu.Items.Add("Settings…", null, (_, _) => new SettingsWindow(_mgr).ShowDialog());
+        menu.Items.Add("Settings…", null, (_, _) => _mgr.ShowSettings());
         menu.Items.Add(new WF.ToolStripSeparator());
         menu.Items.Add("Put icons back on desktop && quit", null, (_, _) => _mgr.RestoreIconsAndQuit());
         menu.Items.Add("Quit", null, (_, _) => _mgr.Quit());

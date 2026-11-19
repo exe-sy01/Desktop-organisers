@@ -37,6 +37,7 @@ On the first run, it offers to sort your desktop into fences automatically.
 | **Always on screen** | Fences can't be moved or resized past the edge of a monitor. A fence left off-screen (e.g. after unplugging a monitor) is pulled back onto the nearest one. Right-click a fence → **Move to centre of screen**, or use the tray menu → **Move all fences to centre of screen** to gather them all. |
 | **Show desktop** | Fences stay visible after Win+D. |
 | **Start with Windows** | Turn it on in Settings → General (tray menu → Settings…). |
+| **Desktop right-click menu** | Right-click the desktop → **Desktop Fences settings** opens Settings. On Windows 11 it's under **Show more options** (or Shift+right-click). Can be turned off in Settings → General; "Put icons back on desktop & quit" removes it. |
 | **Lock all** | Tray menu → **Lock all fences** stops every fence from being moved or resized. |
 
 
