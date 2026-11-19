@@ -121,6 +121,51 @@ try
           !DesktopHider.IsSafeVerb(null),
         "Copy / Cut / Delete / unknown commands are not safe");
     Check(!h.HasPendingElevated, "Nothing needs admin rights for files outside the Public Desktop");
+
+    // Auto-capture rules: extensions, name patterns, catch-all.
+    Check(DesktopFences.FenceManager.NormalizeExt("PDF") == ".pdf" && DesktopFences.FenceManager.NormalizeExt(" .Lnk ") == ".lnk" &&
+          DesktopFences.FenceManager.NormalizeExt("*") == "*" && DesktopFences.FenceManager.NormalizeExt("*Invoice*") == "*invoice*",
+        "Rules: extensions are normalised, patterns and * kept");
+    Check(DesktopFences.FenceManager.IsPattern("*invoice*") && DesktopFences.FenceManager.IsPattern("scan?.png") &&
+          !DesktopFences.FenceManager.IsPattern("*") && !DesktopFences.FenceManager.IsPattern(".pdf"),
+        "Rules: only wildcard rules other than * are name patterns");
+    Check(DesktopFences.FenceManager.MatchesPattern("March Invoice.pdf", "*invoice*") &&
+          DesktopFences.FenceManager.MatchesPattern("Screenshot 2026-11-19.png", "screenshot*") &&
+          !DesktopFences.FenceManager.MatchesPattern("notes.txt", "*invoice*"),
+        "Rules: name patterns match case-insensitively");
+
+    // Settings → Rules
+    bool M(RuleKind k, string v, string p) => SortRules.Matches(new SortRule { Kind = k, Value = v }, p);
+    var invoice = NewFile("March Invoice.pdf");
+    var bigFile = Path.Combine(dir, "big.bin");
+    File.WriteAllBytes(bigFile, new byte[2 * 1024 * 1024]);
+    Check(M(RuleKind.FileType, "Documents", invoice) && !M(RuleKind.FileType, "Images", invoice) &&
+          M(RuleKind.FileType, "Folders", folder) && !M(RuleKind.FileType, "Documents", folder),
+        "Rule: file type categories");
+    Check(M(RuleKind.NameContains, "invoice", invoice) && M(RuleKind.NameStartsWith, "march", invoice) &&
+          M(RuleKind.NameEndsWith, ".pdf", invoice) && !M(RuleKind.NameStartsWith, "invoice", invoice),
+        "Rule: name contains / starts with / ends with");
+    Check(M(RuleKind.SizeLargerThan, "1", bigFile) && !M(RuleKind.SizeLargerThan, "5", bigFile),
+        "Rule: file size");
+    int hour = File.GetCreationTime(invoice).Hour;
+    Check(M(RuleKind.CreatedBetweenHours, $"{hour}-{(hour + 1) % 24}", invoice) &&
+          !M(RuleKind.CreatedBetweenHours, $"{(hour + 1) % 24}-{(hour + 2) % 24}", invoice),
+        "Rule: created between hours");
+    var today = File.GetCreationTime(invoice).DayOfWeek.ToString()[..3];
+    Check(M(RuleKind.CreatedOnDays, $"Xyz, {today}", invoice), "Rule: created on days");
+    Check(!SortRules.Matches(new SortRule { Kind = RuleKind.NameContains, Value = "invoice", Enabled = false }, invoice),
+        "Rule: disabled rules never match");
+    var urlFile = NewFile("site.url");
+    File.WriteAllText(urlFile, "[InternetShortcut]\r\nURL=https://example.com/page\r\n");
+    Check(M(RuleKind.ShortcutTarget, "example.com", urlFile) && M(RuleKind.FileType, "WebLinks", urlFile),
+        "Rule: web link target and type");
+
+    // Colour maths used by the colour sliders.
+    var col = System.Windows.Media.Color.FromRgb(0x2B, 0x4A, 0x6F);
+    var (hh, ss, vv) = ImageFx.ToHsv(col);
+    var back = ImageFx.FromHsv(hh, ss, vv);
+    Check(Math.Abs(back.R - col.R) <= 1 && Math.Abs(back.G - col.G) <= 1 && Math.Abs(back.B - col.B) <= 1,
+        "Colour: HSV round trip");
 }
 finally
 {

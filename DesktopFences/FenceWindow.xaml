@@ -12,7 +12,7 @@
     </WindowChrome.WindowChrome>
 
     <Border x:Name="Root" CornerRadius="8" BorderThickness="1" BorderBrush="#40FFFFFF" Background="#8C1E1E1E">
-        <Grid>
+        <Grid x:Name="LayoutGrid">
             <Grid.RowDefinitions>
                 <RowDefinition Height="30" />
                 <RowDefinition Height="*" />
@@ -31,6 +31,13 @@
                             <DropShadowEffect ShadowDepth="0" BlurRadius="4" Opacity="0.7" Color="Black" />
                         </TextBlock.Effect>
                     </TextBlock>
+                    <!-- Tabs (when fences are grouped) -->
+                    <UniformGrid x:Name="TabStrip" Rows="1" Margin="4,3" Visibility="Collapsed" />
+                    <Border x:Name="TabMenuButton" HorizontalAlignment="Right" Width="26" Background="Transparent"
+                            Visibility="Collapsed" Cursor="Hand" ToolTip="Switch tab"
+                            MouseLeftButtonDown="TabMenuButton_MouseLeftButtonDown">
+                        <TextBlock x:Name="TabMenuGlyph" Text="▾" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="White" />
+                    </Border>
                     <TextBox x:Name="TitleEdit" Visibility="Collapsed" Margin="8,4" Padding="2,0"
                              Background="#55000000" Foreground="White" CaretBrush="White" BorderThickness="0"
                              HorizontalContentAlignment="Center" VerticalContentAlignment="Center" FontSize="13"

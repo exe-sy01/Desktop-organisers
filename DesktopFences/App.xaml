@@ -6,6 +6,10 @@
     <Application.Resources>
         <sys:Double x:Key="IconSize">48</sys:Double>
         <sys:Double x:Key="TileWidth">84</sys:Double>
+        <Visibility x:Key="LabelVisibility">Visible</Visibility>
+        <!-- Per-fence overrides are set in FenceWindow.ApplyAppearance (white or dark text). -->
+        <SolidColorBrush x:Key="FenceTextBrush" Color="White" />
+        <DropShadowEffect x:Key="FenceTextEffect" ShadowDepth="1" BlurRadius="3" Opacity="0.85" Color="Black" />
 
         <!-- Thin, unobtrusive scrollbar for fences -->
         <Style x:Key="FenceThumb" TargetType="Thumb">
@@ -69,13 +73,34 @@
         <DataTemplate x:Key="FenceItemTemplate">
             <StackPanel Width="{DynamicResource TileWidth}" Opacity="{Binding ItemOpacity}"
                         ToolTip="{Binding ToolTip}" ToolTipService.InitialShowDelay="900">
-                <Image Source="{Binding Icon}" Width="{DynamicResource IconSize}" Height="{DynamicResource IconSize}"
-                       HorizontalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality" />
+                <Image Width="{DynamicResource IconSize}" Height="{DynamicResource IconSize}"
+                       HorizontalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality">
+                    <Image.Style>
+                        <Style TargetType="Image">
+                            <Setter Property="Source" Value="{Binding Icon}" />
+                            <Style.Triggers>
+                                <!-- "Blend with wallpaper": grey, see-through icons until the fence is pointed at -->
+                                <DataTrigger Binding="{Binding Blended, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                                    <Setter Property="Source" Value="{Binding MutedIcon}" />
+                                    <Setter Property="Opacity" Value="0.55" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Image.Style>
+                </Image>
                 <TextBlock Text="{Binding Name}" Margin="0,4,0,0" TextAlignment="Center" TextWrapping="Wrap"
-                           TextTrimming="CharacterEllipsis" MaxHeight="32" FontSize="12" Foreground="White">
-                    <TextBlock.Effect>
-                        <DropShadowEffect ShadowDepth="1" BlurRadius="3" Opacity="0.85" Color="Black" />
-                    </TextBlock.Effect>
+                           TextTrimming="CharacterEllipsis" MaxHeight="32" FontSize="12"
+                           Foreground="{DynamicResource FenceTextBrush}" Effect="{DynamicResource FenceTextEffect}"
+                           Visibility="{DynamicResource LabelVisibility}">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Blended, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                                    <Setter Property="Opacity" Value="0.5" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
                 </TextBlock>
             </StackPanel>
         </DataTemplate>

@@ -19,12 +19,35 @@
             <Run x:Name="OpacityLabel" FontWeight="Normal" />
         </TextBlock>
         <Slider x:Name="OpacitySlider" Minimum="0" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True"
-                Margin="0,0,0,14" ValueChanged="OnChanged" />
+                Margin="0,0,0,10" ValueChanged="OnChanged" />
+
+        <Grid Margin="0,0,0,14">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock Text="Text colour" VerticalAlignment="Center" Margin="0,3,14,3" />
+            <ComboBox x:Name="TextColorBox" Grid.Column="1" Margin="0,3" SelectionChanged="OnChanged">
+                <ComboBoxItem Content="Automatic (dark on pale colours)" Tag="Auto" />
+                <ComboBoxItem Content="White" Tag="White" />
+                <ComboBoxItem Content="Black" Tag="Black" />
+            </ComboBox>
+            <TextBlock Grid.Row="1" Text="Title bar" VerticalAlignment="Center" Margin="0,3,14,3" />
+            <ComboBox x:Name="TitlePosBox" Grid.Row="1" Grid.Column="1" Margin="0,3" SelectionChanged="OnChanged">
+                <ComboBoxItem Content="Automatic (bottom when the fence is low on the screen)" Tag="Auto" />
+                <ComboBoxItem Content="Always at the top" Tag="Top" />
+                <ComboBoxItem Content="Always at the bottom" Tag="Bottom" />
+            </ComboBox>
+        </Grid>
 
         <StackPanel x:Name="RulesPanel">
             <TextBlock Text="Auto-capture new desktop items" Style="{StaticResource SectionHeader}" />
             <TextBlock Style="{StaticResource Hint}"
-                       Text="New files that land on the desktop with these extensions go straight into this fence. Comma separated, e.g. .lnk, .url — use * to catch anything no other fence claims." />
+                       Text="New files that land on the desktop and match go straight into this fence. Comma separated: extensions (.lnk, .url), name patterns (*invoice*, Screenshot*), or * to catch anything no other fence claims." />
             <TextBox x:Name="RulesBox" Padding="4,3" Margin="0,6,0,6" />
             <CheckBox x:Name="FoldersCheck" Content="Also capture new folders" Margin="0,0,0,14" />
         </StackPanel>

@@ -37,6 +37,8 @@ public sealed class ConfigStore
         Config.Settings ??= new AppSettings();
         Config.Fences ??= new();
         Config.HiddenByUs ??= new();
+        Config.Layouts ??= new();
+        Config.Rules ??= new();
         foreach (var f in Config.Fences)
         {
             f.Items ??= new();

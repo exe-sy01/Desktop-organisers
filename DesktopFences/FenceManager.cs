@@ -19,6 +19,8 @@ public sealed class FenceManager
     readonly Dictionary<string, DispatcherTimer> _pendingDeletes = new(StringComparer.OrdinalIgnoreCase);
     DesktopWatcher? _watcher;
     DesktopDoubleClick? _doubleClick;
+    HotkeyService? _hotkeys;
+    DateTime _peekStarted;
 
     public ConfigStore Store { get; }
     public AppConfig Config => Store.Config;
@@ -28,6 +30,10 @@ public sealed class FenceManager
     public bool ShuttingDown { get; private set; }
     public bool RaisingFences { get; private set; }
     public bool FencesVisible { get; private set; } = true;
+    /// <summary>Fences are temporarily in front of all windows (Ctrl+Alt+F).</summary>
+    public bool Peeking { get; private set; }
+    /// <summary>Hotkeys that couldn't be registered because another app owns them.</summary>
+    public string HotkeyProblem { get; private set; } = "";
     public IReadOnlyList<FenceWindow> Windows => _windows;
 
     public FenceManager(ConfigStore store)
@@ -106,8 +112,15 @@ public sealed class FenceManager
 
         Layer = new DesktopLayer();
         Layer.Changed += () => { foreach (var w in _windows) PlaceInZOrder(w); };
+        Layer.ForegroundChanged += () =>
+        {
+            // Switching to any other window ends a peek (e.g. after opening something from a fence).
+            if (Peeking && DateTime.UtcNow - _peekStarted > TimeSpan.FromMilliseconds(600)) EndPeek();
+        };
 
+        NormalizeGroups();
         foreach (var fc in Config.Fences.ToList()) OpenWindow(fc);
+        foreach (var w in _windows) w.RebuildTabs(); // every tab's window exists now
 
         RelinkMovedDesktop();
         foreach (var w in _windows) w.Refresh();
@@ -125,7 +138,98 @@ public sealed class FenceManager
             if (Config.Settings.DoubleClickDesktopToToggle) ToggleVisibility();
         };
 
+        _hotkeys = new HotkeyService();
+        RegisterHotkeys();
+
+        DailyBackup();
+        var backupTimer = new DispatcherTimer { Interval = TimeSpan.FromHours(1) }; // catches midnight for always-on PCs
+        backupTimer.Tick += (_, _) => DailyBackup();
+        backupTimer.Start();
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+
         StartupHelper.RefreshPathIfEnabled();
+    }
+
+    void OnDisplaySettingsChanged(object? sender, EventArgs e) =>
+        Application.Current?.Dispatcher.InvokeAsync(() =>
+        {
+            foreach (var w in _windows) w.UpdateTitlePosition(); // also pulls fences off a removed monitor
+        }, DispatcherPriority.Background);
+
+    /// <summary>Gathers every fence in the middle of the main screen, slightly staggered (rescues lost fences).</summary>
+    public void CentreAllFences()
+    {
+        if (!FencesVisible) SetVisible(true);
+        var primary = Native.WorkAreaFor(new Native.RECT { Left = 0, Top = 0, Right = 1, Bottom = 1 }); // main screen starts at 0,0
+        var shown = _windows.Where(w => w.IsActiveTab).ToList();
+        int n = shown.Count;
+        for (int i = 0; i < n; i++)
+            shown[i].MoveToCentre(primary, (i - (n - 1) / 2) * 32);
+        Store.SaveSoon();
+    }
+
+    /// <summary>Moves every fence to the next monitor, keeping its relative position (two monitors: swaps them).</summary>
+    public void SwapMonitors()
+    {
+        var screens = System.Windows.Forms.Screen.AllScreens.OrderBy(s => s.Bounds.Left).ThenBy(s => s.Bounds.Top).ToList();
+        if (screens.Count < 2)
+        {
+            MessageBox.Show("Only one monitor is connected.", "Swap monitors", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        static Native.RECT R(System.Drawing.Rectangle r) => new() { Left = r.Left, Top = r.Top, Right = r.Right, Bottom = r.Bottom };
+        foreach (var w in _windows.Where(w => w.IsActiveTab && w.Handle != IntPtr.Zero).ToList())
+        {
+            if (!Native.GetWindowRect(w.Handle, out var r)) continue;
+            var src = System.Windows.Forms.Screen.FromRectangle(System.Drawing.Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom));
+            int i = screens.FindIndex(s => s.DeviceName == src.DeviceName);
+            var dst = screens[(i + 1) % screens.Count];
+            w.MoveBetweenScreens(R(src.WorkingArea), R(dst.WorkingArea));
+        }
+        Store.SaveSoon();
+    }
+
+    void RegisterHotkeys()
+    {
+        if (_hotkeys == null) return;
+        _hotkeys.UnregisterAll();
+        HotkeyProblem = "";
+        if (!Config.Settings.HotkeysEnabled) return;
+        const uint ctrlAlt = Native.MOD_CONTROL | Native.MOD_ALT;
+        var taken = new List<string>();
+        if (!_hotkeys.Register(ctrlAlt, 0x48 /* H */, ToggleVisibility)) taken.Add("Ctrl+Alt+H");
+        if (!_hotkeys.Register(ctrlAlt, 0x46 /* F */, TogglePeek)) taken.Add("Ctrl+Alt+F");
+        if (taken.Count > 0) HotkeyProblem = string.Join(" and ", taken) + " is already used by another app.";
+    }
+
+    // ------------------------------------------------------------------ peek
+
+    /// <summary>Brings every fence in front of all windows until you switch to another window.</summary>
+    public void TogglePeek()
+    {
+        if (Peeking) { EndPeek(); return; }
+        if (!FencesVisible) SetVisible(true);
+        Peeking = true;
+        _peekStarted = DateTime.UtcNow;
+        foreach (var w in _windows)
+        {
+            PlaceInZOrder(w);
+            w.UpdateIdleFade();
+        }
+    }
+
+    public void EndPeek()
+    {
+        if (!Peeking) return;
+        Peeking = false;
+        foreach (var w in _windows)
+        {
+            if (w.Handle != IntPtr.Zero)
+                Native.SetWindowPos(w.Handle, Native.HWND_NOTOPMOST, 0, 0, 0, 0,
+                    Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER);
+            PlaceInZOrder(w);
+            w.UpdateIdleFade();
+        }
     }
 
     public void FirstRun()
@@ -154,6 +258,8 @@ public sealed class FenceManager
         ShuttingDown = true;
         try { Hider.FlushElevatedNow(); } catch (Exception ex) { Log.Error("Flush on exit", ex); } // don't drop pending changes
         Store.SaveNow();
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        _hotkeys?.Dispose();
         _doubleClick?.Dispose();
         _watcher?.Dispose();
         Layer?.Dispose();
@@ -189,8 +295,130 @@ public sealed class FenceManager
     {
         var w = new FenceWindow(this, fc);
         _windows.Add(w);
-        if (FencesVisible) w.Show();
+        if (FencesVisible && w.IsActiveTab) w.Show();
         return w;
+    }
+
+    // ------------------------------------------------------------------ tab groups
+
+    /// <summary>The fences shown as tabs together with <paramref name="w"/>, in tab order (just w if it's not grouped).</summary>
+    public List<FenceWindow> GroupMembers(FenceWindow w)
+    {
+        if (w.Config.GroupId == null) return new List<FenceWindow> { w };
+        var ids = Config.Fences.Where(f => f.GroupId == w.Config.GroupId).Select(f => f.Id).ToList();
+        return ids.Select(id => _windows.FirstOrDefault(x => x.Config.Id == id)).OfType<FenceWindow>().ToList();
+    }
+
+    public void RefreshTabs(FenceWindow w)
+    {
+        foreach (var m in GroupMembers(w)) m.RebuildTabs();
+    }
+
+    /// <summary>Fixes groups left inconsistent (e.g. by editing the config by hand): one active tab, no single-tab groups.</summary>
+    void NormalizeGroups()
+    {
+        foreach (var g in Config.Fences.Where(f => f.GroupId != null).GroupBy(f => f.GroupId).ToList())
+        {
+            var list = g.ToList();
+            if (list.Count < 2)
+            {
+                foreach (var f in list) { f.GroupId = null; f.ActiveTab = false; }
+                continue;
+            }
+            var active = list.FirstOrDefault(f => f.ActiveTab) ?? list[0];
+            foreach (var f in list) f.ActiveTab = f == active;
+        }
+    }
+
+    public void SwitchTab(FenceWindow from, FenceWindow to)
+    {
+        if (from == to || from.Config.GroupId == null || from.Config.GroupId != to.Config.GroupId) return;
+        from.Config.ActiveTab = false;
+        to.Config.ActiveTab = true;
+        to.ShowAsTab(from); // shown on top of the old tab first, so nothing flickers
+        from.Hide();
+        RefreshTabs(to);
+        Store.SaveSoon();
+    }
+
+    /// <summary>Called when a fence is dropped after moving it: merges it into the fence whose title bar it was dropped on.</summary>
+    public bool TryMergeOnDrop(FenceWindow dragged)
+    {
+        if (!Config.Settings.EnableTabs) return false;
+        Native.GetCursorPos(out var p);
+        var target = _windows.FirstOrDefault(w =>
+            w.IsVisible && w.Handle != IntPtr.Zero && w != dragged &&
+            (w.Config.GroupId == null || w.Config.GroupId != dragged.Config.GroupId) &&
+            w.TitleBarContains(p));
+        if (target == null) return false;
+        if (Config.Settings.ConfirmNewTabs && MessageBox.Show(
+                $"Combine \"{dragged.Config.Title}\" with \"{target.Config.Title}\" as tabs of one fence?\n\n" +
+                "Click a tab to switch. To split them again, right-click → Tab → Detach (or Shift+click a tab).\n" +
+                "This question can be turned off in Settings → Tabs.",
+                "Create tabs", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+            return false;
+
+        var gid = target.Config.GroupId ?? Guid.NewGuid().ToString("N");
+        var targetMembers = GroupMembers(target);
+        var draggedMembers = GroupMembers(dragged);
+        foreach (var m in targetMembers) { m.Config.GroupId = gid; m.Config.ActiveTab = false; }
+        // Put the new tabs right after the target group's last tab.
+        int insertAt = Config.Fences.IndexOf(targetMembers[^1].Config) + 1;
+        foreach (var m in draggedMembers)
+        {
+            m.Config.GroupId = gid;
+            m.Config.ActiveTab = false;
+            int i = Config.Fences.IndexOf(m.Config);
+            Config.Fences.RemoveAt(i);
+            if (i < insertAt) insertAt--;
+            Config.Fences.Insert(insertAt++, m.Config);
+        }
+        // The dropped fence becomes the visible tab, in the target's place.
+        dragged.Config.ActiveTab = true;
+        dragged.ShowAsTab(target);
+        target.Hide();
+        foreach (var m in draggedMembers.Where(m => m != dragged)) m.Hide();
+        RefreshTabs(dragged);
+        Store.SaveSoon();
+        return true;
+    }
+
+    /// <summary>Takes a tab out of its group and shows it as a fence of its own, just below and to the right.</summary>
+    public void DetachTab(FenceWindow w)
+    {
+        var members = GroupMembers(w);
+        if (members.Count < 2) return;
+        var others = members.Where(m => m != w).ToList();
+        if (w.Config.ActiveTab)
+        {
+            others[0].Config.ActiveTab = true;
+            others[0].ShowAsTab(w);
+        }
+        var shown = others.First(m => m.Config.ActiveTab);
+        w.Config.GroupId = null;
+        w.Config.ActiveTab = false;
+        if (others.Count == 1) { others[0].Config.GroupId = null; others[0].Config.ActiveTab = false; }
+
+        // Same size as the group, offset so both are visible.
+        w.ShowAsTab(shown);
+        w.Config.Left += 36;
+        w.Config.Top += 36;
+        w.ApplyLayout(w.CaptureLayout());
+        foreach (var m in others) m.RebuildTabs();
+        w.RebuildTabs();
+        foreach (var m in others) m.ApplyAppearance(); // a group of one goes back to a plain title bar
+        Store.SaveSoon();
+    }
+
+    public void MoveTab(FenceWindow w, int delta)
+    {
+        var members = GroupMembers(w);
+        int i = members.IndexOf(w), j = i + delta;
+        if (i < 0 || j < 0 || j >= members.Count) return;
+        int a = Config.Fences.IndexOf(w.Config), b = Config.Fences.IndexOf(members[j].Config);
+        (Config.Fences[a], Config.Fences[b]) = (Config.Fences[b], Config.Fences[a]);
+        RefreshTabs(w);
+        Store.SaveSoon();
     }
 
     public FenceWindow CreateFence(string title, double? left = null, double? top = null,
@@ -236,6 +464,15 @@ public sealed class FenceManager
                 return;
         }
         var paths = w.Config.Items.ToList();
+        if (w.Config.GroupId != null)
+        {
+            // Deleting one tab: show a neighbour in its place and keep the rest of the group.
+            var others = GroupMembers(w).Where(m => m != w).ToList();
+            if (w.Config.ActiveTab && others.Count > 0) SwitchTab(w, others[0]);
+            if (others.Count == 1) { others[0].Config.GroupId = null; others[0].Config.ActiveTab = false; }
+            w.Config.GroupId = null;
+            foreach (var m in others) { m.RebuildTabs(); m.ApplyAppearance(); }
+        }
         Config.Fences.Remove(w.Config);
         _windows.Remove(w);
         w.CloseForReal();
@@ -248,6 +485,7 @@ public sealed class FenceManager
 
     public void SetVisible(bool visible)
     {
+        if (!visible) EndPeek();
         FencesVisible = visible;
         foreach (var w in _windows) w.FadeTo(visible);
     }
@@ -256,7 +494,11 @@ public sealed class FenceManager
     {
         if (w.Handle == IntPtr.Zero || !w.IsVisible) return;
         const uint flags = Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER;
-        if (Layer.DesktopShown)
+        if (Peeking)
+        {
+            Native.SetWindowPos(w.Handle, Native.HWND_TOPMOST, 0, 0, 0, 0, flags);
+        }
+        else if (Layer.DesktopShown)
         {
             RaisingFences = true;
             Native.SetWindowPos(w.Handle, Native.HWND_TOPMOST, 0, 0, 0, 0, flags);
@@ -518,18 +760,38 @@ public sealed class FenceManager
         var ext = Path.GetExtension(path).ToLowerInvariant();
         var standard = _windows.Where(w => w.Config.Kind == FenceKind.Standard).ToList();
 
+        var name = Path.GetFileName(path);
+        FenceWindow? ById(string id) => standard.FirstOrDefault(w => w.Config.Id == id);
+
+        // 1. Rules from Settings → Rules, in order.
+        foreach (var rule in Config.Rules)
+            if (ById(rule.TargetFenceId) is { } ruleTarget && SortRules.Matches(rule, path))
+                return ruleTarget;
+
+        // 2. Each fence's own auto-capture list. Name patterns ("*invoice*") are more specific than extensions, so they win.
+        foreach (var w in standard)
+            if (w.Config.AutoCaptureExtensions.Any(x => IsPattern(x) && MatchesPattern(name, x))) return w;
         foreach (var w in standard)
         {
             if (isDir && w.Config.CaptureFolders) return w;
-            if (!isDir && ext.Length > 0 && w.Config.AutoCaptureExtensions.Any(x => NormalizeExt(x) == ext)) return w;
+            if (!isDir && ext.Length > 0 && w.Config.AutoCaptureExtensions.Any(x => !IsPattern(x) && NormalizeExt(x) == ext)) return w;
         }
-        return standard.FirstOrDefault(w => w.Config.AutoCaptureExtensions.Contains("*"));
+        // 3. Catch-alls: a fence listing "*", then the default fence from Settings → Rules.
+        return standard.FirstOrDefault(w => w.Config.AutoCaptureExtensions.Contains("*"))
+               ?? (Config.Settings.DefaultFenceId.Length > 0 ? ById(Config.Settings.DefaultFenceId) : null);
     }
 
+    /// <summary>A rule with wildcards that isn't the lone catch-all "*".</summary>
+    public static bool IsPattern(string rule) => rule != "*" && rule.IndexOfAny(new[] { '*', '?' }) >= 0;
+
+    public static bool MatchesPattern(string name, string pattern) =>
+        System.IO.Enumeration.FileSystemName.MatchesSimpleExpression(pattern, name, ignoreCase: true);
+
+    /// <summary>Cleans up a rule: "PDF" becomes ".pdf"; patterns and "*" are kept as typed (lower case).</summary>
     public static string NormalizeExt(string x)
     {
         x = x.Trim().ToLowerInvariant();
-        if (x == "*" || x.Length == 0) return x;
+        if (x == "*" || x.Length == 0 || IsPattern(x)) return x;
         return x.StartsWith('.') ? x : "." + x;
     }
 
@@ -567,7 +829,9 @@ public sealed class FenceManager
     internal Native.RECT Snap(FenceWindow self, Native.RECT r, int edge)
     {
         double dpi = VisualTreeHelper.GetDpi(self).DpiScaleX;
-        int th = (int)(12 * dpi), gap = (int)(8 * dpi);
+        var s = Config.Settings;
+        int th = (int)(12 * dpi);
+        int gap = s.SnapKeepSpacing ? (int)(Math.Clamp(s.SnapSpacing, 0, 100) * dpi) : 0;
         var wa = Native.WorkAreaFor(r);
 
         var lefts = new List<int> { wa.Left + gap };
@@ -581,8 +845,14 @@ public sealed class FenceManager
             if (!Native.GetWindowRect(w.Handle, out var o)) continue;
             bool vClose = o.Top - th <= r.Bottom && o.Bottom + th >= r.Top;
             bool hClose = o.Left - th <= r.Right && o.Right + th >= r.Left;
-            if (vClose) { lefts.Add(o.Right + gap); lefts.Add(o.Left); rights.Add(o.Left - gap); rights.Add(o.Right); }
-            if (hClose) { tops.Add(o.Bottom + gap); tops.Add(o.Top); bottoms.Add(o.Top - gap); bottoms.Add(o.Bottom); }
+            // Side by side (with the chosen spacing), and optionally lined up with the other fence's edges.
+            if (vClose) { lefts.Add(o.Right + gap); rights.Add(o.Left - gap); }
+            if (hClose) { tops.Add(o.Bottom + gap); bottoms.Add(o.Top - gap); }
+            if (s.SnapAlignEdges)
+            {
+                if (vClose) { lefts.Add(o.Left); rights.Add(o.Right); }
+                if (hClose) { tops.Add(o.Top); bottoms.Add(o.Bottom); }
+            }
         }
 
         int? Best(int value, List<int> targets)
@@ -612,8 +882,41 @@ public sealed class FenceManager
             if (edge is 2 or 5 or 8 && Best(r.Right, rights) is int rr) r.Right += rr;
             if (edge is 3 or 4 or 5 && Best(r.Top, tops) is int t) r.Top += t;
             if (edge is 6 or 7 or 8 && Best(r.Bottom, bottoms) is int b) r.Bottom += b;
+
+            if (s.SnapSizeToIcons)
+            {
+                // Size to whole rows and columns of icons.
+                double icon = Math.Clamp(s.IconSize, 24, 96);
+                double cellW = (TileWidth() + 12) * dpi, cellH = (icon + (s.ShowIconLabels ? 50 : 14)) * dpi;
+                double chromeW = 14 * dpi, chromeH = (30 + 10) * dpi;
+                int w = (int)Math.Round(Math.Max(1, Math.Round((r.Width - chromeW) / cellW)) * cellW + chromeW);
+                int h = (int)Math.Round(Math.Max(1, Math.Round((r.Height - chromeH) / cellH)) * cellH + chromeH);
+                if (edge is 1 or 4 or 7) r.Left = r.Right - w;
+                if (edge is 2 or 5 or 8) r.Right = r.Left + w;
+                if (edge is 3 or 4 or 5) r.Top = r.Bottom - h;
+                if (edge is 6 or 7 or 8) r.Bottom = r.Top + h;
+            }
         }
         return r;
+    }
+
+    /// <summary>Width of one icon tile (DIPs): from the icon size, or Windows' desktop icon spacing if chosen.</summary>
+    double TileWidth()
+    {
+        var s = Config.Settings;
+        double icon = Math.Clamp(s.IconSize, 24, 96);
+        if (s.MatchDesktopIconSpacing)
+        {
+            try
+            {
+                // Stored in twips as a negative number (e.g. -1125 = 75 px), measured at 96 DPI.
+                using var key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop\WindowMetrics");
+                if (key?.GetValue("IconSpacing") is string v && int.TryParse(v, out int tw) && tw < 0)
+                    return Math.Max(icon + 8, -tw / 15.0 - 12);
+            }
+            catch { }
+        }
+        return icon + 36;
     }
 
     // ------------------------------------------------------------------ settings
@@ -622,7 +925,8 @@ public sealed class FenceManager
     {
         double s = Math.Clamp(Config.Settings.IconSize, 24, 96);
         Application.Current.Resources["IconSize"] = s;
-        Application.Current.Resources["TileWidth"] = s + 36;
+        Application.Current.Resources["TileWidth"] = TileWidth();
+        Application.Current.Resources["LabelVisibility"] = Config.Settings.ShowIconLabels ? Visibility.Visible : Visibility.Collapsed;
     }
 
     public void ApplySettings(AppSettings updated)
@@ -642,11 +946,102 @@ public sealed class FenceManager
                     Hider.Unhide(p);
         }
         ApplyIconSize();
+        if (old.HotkeysEnabled != updated.HotkeysEnabled) RegisterHotkeys();
         foreach (var w in _windows)
         {
             w.ApplyAppearance();
             w.Refresh();
         }
+        Store.SaveSoon();
+    }
+
+    // ------------------------------------------------------------------ all fences
+
+    public bool AllLocked => _windows.Count > 0 && _windows.All(w => w.Config.Locked);
+    public bool AnyUnrolled => _windows.Any(w => !w.Config.RolledUp);
+
+    public void RollUpAll(bool rolledUp)
+    {
+        foreach (var w in _windows) w.SetRolledUp(rolledUp);
+    }
+
+    public void LockAll(bool locked)
+    {
+        foreach (var w in _windows) w.SetLocked(locked);
+    }
+
+    // ------------------------------------------------------------------ layout snapshots
+
+    public void SaveLayoutInteractive()
+    {
+        var screen = $"{SystemParameters.PrimaryScreenWidth:0}x{SystemParameters.PrimaryScreenHeight:0}";
+        var dlg = new Dialogs.InputDialog("Save layout", "Name for this layout:", $"Layout {Config.Layouts.Count + 1} ({screen})");
+        if (dlg.ShowDialog() != true) return;
+        var name = dlg.Value.Trim();
+        if (name.Length == 0) return;
+        Config.Layouts.RemoveAll(l => l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        Config.Layouts.Add(new LayoutSnapshot
+        {
+            Name = name,
+            Saved = DateTime.Now,
+            Fences = _windows.Select(w => w.CaptureLayout()).ToList(),
+        });
+        Store.SaveSoon();
+        Tray?.Balloon("Layout saved", $"Restore \"{name}\" any time from the tray menu under Layouts.");
+    }
+
+    /// <summary>
+    /// Once a day: saves the fence layout as an automatic snapshot (restorable from the tray) and copies
+    /// config.json to the Backups folder. The newest 7 of each are kept.
+    /// </summary>
+    public void DailyBackup(bool force = false)
+    {
+        if ((!Config.Settings.DailyBackups && !force) || ShuttingDown) return;
+        var today = DateTime.Today;
+        if (force) Config.Layouts.RemoveAll(l => l.Automatic && l.Saved.Date == today);
+        if (Config.Layouts.Any(l => l.Automatic && l.Saved.Date == today)) return;
+        Config.Layouts.Add(new LayoutSnapshot
+        {
+            Name = $"Daily backup {today:yyyy-MM-dd}",
+            Saved = DateTime.Now,
+            Automatic = true,
+            Fences = _windows.Select(w => w.CaptureLayout()).ToList(),
+        });
+        foreach (var old in Config.Layouts.Where(l => l.Automatic).OrderByDescending(l => l.Saved).Skip(7).ToList())
+            Config.Layouts.Remove(old);
+        Store.SaveNow();
+        try
+        {
+            var dir = Path.Combine(Store.Dir, "Backups");
+            Directory.CreateDirectory(dir);
+            File.Copy(Store.FilePath, Path.Combine(dir, $"config-{today:yyyy-MM-dd}.json"), overwrite: true);
+            foreach (var f in new DirectoryInfo(dir).GetFiles("config-*.json").OrderByDescending(f => f.Name).Skip(7))
+                f.Delete();
+        }
+        catch (Exception ex) { Log.Error("Daily backup", ex); }
+    }
+
+    public void RestoreLayout(LayoutSnapshot snap)
+    {
+        if (!FencesVisible) SetVisible(true);
+        int applied = 0;
+        foreach (var l in snap.Fences)
+        {
+            var w = _windows.FirstOrDefault(x => x.Config.Id == l.Id);
+            if (w == null) continue;
+            w.ApplyLayout(l);
+            applied++;
+        }
+        Store.SaveSoon();
+        if (applied < snap.Fences.Count)
+            Tray?.Balloon("Layout restored", $"{snap.Fences.Count - applied} fence(s) in this layout have been deleted since it was saved.");
+    }
+
+    public void DeleteLayout(LayoutSnapshot snap)
+    {
+        if (MessageBox.Show($"Delete the saved layout \"{snap.Name}\"?\n\nYour fences aren't changed.", "Desktop Fences",
+                MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+        Config.Layouts.Remove(snap);
         Store.SaveSoon();
     }
 

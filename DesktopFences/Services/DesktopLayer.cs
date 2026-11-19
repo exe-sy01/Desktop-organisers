@@ -16,6 +16,8 @@ public sealed class DesktopLayer : IDisposable
 
     public bool DesktopShown { get; private set; }
     public event Action? Changed;
+    /// <summary>Another app's window (or the desktop) became the foreground window.</summary>
+    public event Action? ForegroundChanged;
 
     public DesktopLayer()
     {
@@ -29,6 +31,7 @@ public sealed class DesktopLayer : IDisposable
         if (hwnd == IntPtr.Zero) return;
         try
         {
+            ForegroundChanged?.Invoke();
             if (IsDesktop(hwnd))
             {
                 // "Show desktop" raises the desktop window above everything else, including us.

@@ -35,7 +35,14 @@ public partial class FenceWindow : Window
     bool _hoverExpanded;
     bool _menuOpen;
     bool _closingForReal;
+    bool _dragOver;
     int _fadeVersion;
+    double _idleFadeTarget = 1;
+
+    // Title bar at the bottom (fence sits low on its screen). Config.Top always stores the *expanded*
+    // top, so a rolled-up fence with a bottom title bar stays anchored at its bottom edge.
+    bool _titleBottom;
+    bool _layingOut;
 
     // title-bar move
     bool _moving;
@@ -62,7 +69,7 @@ public partial class FenceWindow : Window
         ItemsList.ItemsSource = Items;
         ContextMenu = _menu;
         _menu.Opened += (_, _) => _menuOpen = true;
-        _menu.Closed += (_, _) => { _menuOpen = false; ScheduleCollapse(); };
+        _menu.Closed += (_, _) => { _menuOpen = false; ScheduleCollapse(); UpdateIdleFade(); };
         ContextMenuOpening += OnContextMenuOpening;
 
         _collapseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
@@ -71,21 +78,32 @@ public partial class FenceWindow : Window
         _portalRefreshTimer.Tick += (_, _) => { _portalRefreshTimer.Stop(); Refresh(); };
 
         EnsureOnScreen();
+        _titleBottom = cfg.TitlePosition == TitlePosition.Bottom || (cfg.TitlePosition == TitlePosition.Auto && cfg.TitleAtBottom);
         Left = cfg.Left;
         Top = cfg.Top;
         Width = cfg.Width;
         Height = cfg.RolledUp ? CollapsedHeight : cfg.Height;
 
         SourceInitialized += OnSourceInitialized;
-        LocationChanged += (_, _) => { Config.Left = Left; Config.Top = Top; _mgr.Store.SaveSoon(); };
+        LocationChanged += (_, _) =>
+        {
+            if (_layingOut) return;
+            Config.Left = Left;
+            Config.Top = Collapsed && _titleBottom ? Top - (ExpandedHeight - CollapsedHeight) : Top;
+            _mgr.Store.SaveSoon();
+        };
         SizeChanged += OnSizeChanged;
         StateChanged += (_, _) => { if (WindowState != WindowState.Normal) WindowState = WindowState.Normal; };
-        MouseEnter += (_, _) => Expand();
-        MouseLeave += (_, _) => ScheduleCollapse();
+        MouseEnter += (_, _) => { Expand(); UpdateIdleFade(); };
+        MouseLeave += (_, _) => { ScheduleCollapse(); UpdateIdleFade(); };
         DragEnter += OnDragOver;
         DragOver += OnDragOver;
-        DragLeave += (_, _) => { SetDropHighlight(false); ScheduleCollapse(); };
+        DragLeave += (_, _) => { _dragOver = false; SetDropHighlight(false); ScheduleCollapse(); UpdateIdleFade(); };
         Drop += OnDrop;
+        // Fences without a title bar are moved by dragging empty space in the icon area.
+        ItemsList.AddHandler(MouseMoveEvent, new MouseEventHandler(TitleBar_MouseMove), true);
+        ItemsList.AddHandler(MouseLeftButtonUpEvent, new MouseButtonEventHandler(TitleBar_MouseLeftButtonUp), true);
+        ItemsList.AddHandler(LostMouseCaptureEvent, new MouseEventHandler(TitleBar_LostMouseCapture), true);
 
         ApplyAppearance();
         ApplyRollState();
@@ -111,6 +129,7 @@ public partial class FenceWindow : Window
 
         HwndSource.FromHwnd(_hwnd)?.AddHook(WndProc);
         _mgr.PlaceInZOrder(this);
+        UpdateTitlePosition(); // now that we know which screen we're on
     }
 
     IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -119,7 +138,7 @@ public partial class FenceWindow : Window
         {
             case Native.WM_WINDOWPOSCHANGING:
                 // Stay on the desktop layer: never let activation raise us above other windows.
-                if (!_mgr.Layer.DesktopShown && !_mgr.RaisingFences)
+                if (!_mgr.Layer.DesktopShown && !_mgr.RaisingFences && !_mgr.Peeking)
                 {
                     var wp = Marshal.PtrToStructure<Native.WINDOWPOS>(lParam);
                     if ((wp.flags & Native.SWP_NOZORDER) == 0)
@@ -131,14 +150,23 @@ public partial class FenceWindow : Window
                 break;
 
             case Native.WM_SIZING:
+            {
+                var r = Marshal.PtrToStructure<Native.RECT>(lParam);
                 if (_mgr.Config.Settings.SnapToEdges && (Keyboard.Modifiers & ModifierKeys.Alt) == 0)
-                {
-                    var r = Marshal.PtrToStructure<Native.RECT>(lParam);
                     r = _mgr.Snap(this, r, wParam.ToInt32());
-                    Marshal.StructureToPtr(r, lParam, false);
-                    handled = true;
-                    return new IntPtr(1);
-                }
+                // Never resize past the edges of the screen.
+                var wa = Native.WorkAreaFor(r);
+                if (r.Left < wa.Left) r.Left = wa.Left;
+                if (r.Top < wa.Top) r.Top = wa.Top;
+                if (r.Right > wa.Right) r.Right = wa.Right;
+                if (r.Bottom > wa.Bottom) r.Bottom = wa.Bottom;
+                Marshal.StructureToPtr(r, lParam, false);
+                handled = true;
+                return new IntPtr(1);
+            }
+
+            case Native.WM_EXITSIZEMOVE: // finished resizing with the mouse
+                Dispatcher.InvokeAsync(UpdateTitlePosition);
                 break;
 
             case Native.WM_SYSCOMMAND:
@@ -180,6 +208,7 @@ public partial class FenceWindow : Window
 
     void OnSizeChanged(object sender, SizeChangedEventArgs e)
     {
+        if (_layingOut) return;
         Config.Width = Width;
         if (!Config.RolledUp && !_hoverExpanded && ItemsList.Visibility == Visibility.Visible)
             Config.Height = Height;
@@ -192,10 +221,120 @@ public partial class FenceWindow : Window
     {
         var c = ParseColor(Config.TintColor);
         byte a = (byte)Math.Round(Math.Clamp(Config.Opacity, 0, 1) * 255);
-        Root.Background = new SolidColorBrush(Color.FromArgb(a, c.R, c.G, c.B));
+        _normalBackground = Color.FromArgb(a, c.R, c.G, c.B);
+        _background = new SolidColorBrush(_blendShown ? BlendedBackground : _normalBackground);
+        Root.Background = _background;
         TitleText.Text = Config.Title;
+
+        // Text colour: white with a dark shadow, or dark with a light glow on pale fences.
+        bool dark = UseDarkText();
+        Resources["FenceTextBrush"] = dark ? DarkTextBrush : Brushes.White;
+        Resources["FenceTextEffect"] = dark ? LightGlow : DarkShadow;
+        TitleText.Foreground = dark ? DarkTextBrush : Brushes.White;
+        TabMenuGlyph.Foreground = TitleText.Foreground;
+        TitleText.Effect = dark ? LightGlow : DarkTitleShadow;
+        EmptyHint.Foreground = new SolidColorBrush(dark ? Color.FromArgb(0xAA, 0, 0, 0) : Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF));
+        EmptyHint.Effect = dark ? null : DarkShadow;
+
+        var s = _mgr.Config.Settings;
+        TitleText.HorizontalAlignment = s.TitleAlignment switch
+        {
+            TitleAlignment.Left => HorizontalAlignment.Left,
+            TitleAlignment.Right => HorizontalAlignment.Right,
+            _ => HorizontalAlignment.Center,
+        };
+        TitleEdit.HorizontalContentAlignment = TitleText.HorizontalAlignment;
+
+        ApplyTitleLayout();
+        RebuildTabs();
         UpdateResizeability();
+        _idleFadeTarget = -1; // re-apply hover visuals with the new settings
+        UpdateIdleFade();
     }
+
+    double _titleOpacityTarget = 1;
+    Color _normalBackground;
+    SolidColorBrush _background = new(Colors.Transparent);
+    bool _blendShown;
+    Color BlendedBackground => Color.FromArgb(0x0C, _normalBackground.R, _normalBackground.G, _normalBackground.B);
+
+    public static readonly DependencyProperty BlendedProperty =
+        DependencyProperty.Register(nameof(Blended), typeof(bool), typeof(FenceWindow), new PropertyMetadata(false));
+
+    /// <summary>True while the fence blends into the wallpaper (icon template switches to grey icons).</summary>
+    public bool Blended
+    {
+        get => (bool)GetValue(BlendedProperty);
+        set => SetValue(BlendedProperty, value);
+    }
+
+    /// <summary>The fence is being pointed at or used (so idle fading / blending / hidden title bars don't apply).</summary>
+    bool InUse => IsMouseOver || _menuOpen || _dragging || _dragOver || _moving || _mgr.Peeking || TitleEdit.IsVisible;
+
+    static readonly Brush DarkTextBrush = Freeze(new SolidColorBrush(Color.FromRgb(0x1A, 0x1A, 0x1A)));
+    static readonly System.Windows.Media.Effects.Effect DarkShadow =
+        Freeze(new System.Windows.Media.Effects.DropShadowEffect { ShadowDepth = 1, BlurRadius = 3, Opacity = 0.85, Color = Colors.Black });
+    static readonly System.Windows.Media.Effects.Effect DarkTitleShadow =
+        Freeze(new System.Windows.Media.Effects.DropShadowEffect { ShadowDepth = 0, BlurRadius = 4, Opacity = 0.7, Color = Colors.Black });
+    static readonly System.Windows.Media.Effects.Effect LightGlow =
+        Freeze(new System.Windows.Media.Effects.DropShadowEffect { ShadowDepth = 0, BlurRadius = 4, Opacity = 0.6, Color = Colors.White });
+
+    static T Freeze<T>(T f) where T : Freezable { f.Freeze(); return f; }
+
+    bool UseDarkText()
+    {
+        if (Config.TextColor == TextColorMode.White) return false;
+        if (Config.TextColor == TextColorMode.Black) return true;
+        // Auto: dark text only on a pale, mostly opaque background (the wallpaper shows through otherwise).
+        var c = ParseColor(Config.TintColor);
+        double lum = (0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B) / 255;
+        return lum > 0.6 && Config.Opacity >= 0.45;
+    }
+
+    /// <summary>
+    /// Everything that changes when the mouse arrives or leaves: idle fading, blending into the
+    /// wallpaper, title bars shown only on hover, and scrollbars shown only on hover.
+    /// </summary>
+    public void UpdateIdleFade()
+    {
+        var s = _mgr.Config.Settings;
+        bool inUse = InUse;
+
+        double idle = Math.Clamp(s.IdleOpacity, 0.15, 1);
+        double target = inUse || idle >= 0.999 ? 1 : idle;
+        if (Math.Abs(target - _idleFadeTarget) >= 0.001)
+        {
+            _idleFadeTarget = target;
+            Root.BeginAnimation(OpacityProperty, new DoubleAnimation(target, TimeSpan.FromMilliseconds(target >= 1 ? 120 : 450)));
+        }
+
+        bool blend = s.BlendWithWallpaper && !inUse;
+        if (blend != _blendShown)
+        {
+            _blendShown = blend;
+            Blended = blend;
+            if (blend && Items.Any(i => i.MutedIcon == null)) Refresh(); // make the grey icons
+            _background.BeginAnimation(SolidColorBrush.ColorProperty,
+                new ColorAnimation(blend ? BlendedBackground : _normalBackground, TimeSpan.FromMilliseconds(blend ? 500 : 150)));
+            SetDropHighlight(false);
+            TitleBar.Background = blend ? Brushes.Transparent : TitleBarBrush;
+        }
+        TitleText.Opacity = blend ? 0.55 : 1;
+        TabStrip.Opacity = TabMenuButton.Opacity = blend ? 0.45 : 1;
+
+        // Title bar only while pointed at (a rolled-up fence always shows it – it's all there is).
+        double titleTarget = s.TitleBars == TitleBarMode.OnHover && !inUse && !_shownCollapsed && Config.GroupId == null ? 0 : 1;
+        if (Math.Abs(titleTarget - _titleOpacityTarget) > 0.01)
+        {
+            _titleOpacityTarget = titleTarget;
+            TitleBar.BeginAnimation(OpacityProperty, new DoubleAnimation(titleTarget, TimeSpan.FromMilliseconds(titleTarget > 0 ? 120 : 300)));
+        }
+
+        ScrollViewer.SetVerticalScrollBarVisibility(ItemsList,
+            s.HideScrollbarsUntilHover && !inUse ? ScrollBarVisibility.Hidden : ScrollBarVisibility.Auto);
+    }
+
+    static readonly Brush TitleBarBrush = Freeze(new SolidColorBrush(Color.FromArgb(0x22, 0, 0, 0)));
 
     public static Color ParseColor(string? s)
     {
@@ -216,13 +355,15 @@ public partial class FenceWindow : Window
     }
 
     void SetDropHighlight(bool on) =>
-        Root.BorderBrush = new SolidColorBrush(on ? Color.FromArgb(0xC0, 0xFF, 0xFF, 0xFF) : Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF));
+        Root.BorderBrush = new SolidColorBrush(on ? Color.FromArgb(0xC0, 0xFF, 0xFF, 0xFF)
+            : _blendShown ? Colors.Transparent : Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF));
 
     public void FadeTo(bool show)
     {
         int version = ++_fadeVersion;
         if (show)
         {
+            if (!IsActiveTab) return; // other tabs of a group stay hidden
             if (!IsVisible) { Opacity = 0; Show(); _mgr.PlaceInZOrder(this); }
         }
         else if (!IsVisible) return;
@@ -244,18 +385,295 @@ public partial class FenceWindow : Window
     {
         Config.RolledUp = !Config.RolledUp;
         _hoverExpanded = false;
-        ApplyRollState();
+        ApplyRollState(animate: true);
         _mgr.Store.SaveSoon();
     }
 
-    void ApplyRollState()
+    public void SetRolledUp(bool rolledUp)
     {
-        bool collapsed = Config.RolledUp && !_hoverExpanded;
+        if (Config.RolledUp != rolledUp) ToggleRollUp();
+    }
+
+    public void SetLocked(bool locked)
+    {
+        Config.Locked = locked;
+        UpdateResizeability();
+        _mgr.Store.SaveSoon();
+    }
+
+    // Without a title bar there's nothing to roll up to, so "Never" fences always show their icons.
+    bool Collapsed => Config.RolledUp && !_hoverExpanded && TitleMode != TitleBarMode.Never;
+
+    /// <summary>Title bar mode for this fence (tab groups always show their tabs).</summary>
+    TitleBarMode TitleMode => Config.GroupId != null ? TitleBarMode.Always : _mgr.Config.Settings.TitleBars;
+
+    public bool IsActiveTab => Config.GroupId == null || Config.ActiveTab;
+    double ExpandedHeight => Math.Max(Config.Height, 80);
+
+    /// <summary>What's on screen right now (lags behind <see cref="Collapsed"/> while rolling up).</summary>
+    bool _shownCollapsed;
+    int _rollVersion;
+
+    /// <param name="animate">
+    /// Slide the fence open/closed instead of snapping. The window itself is resized only once (to the
+    /// full size before unrolling, or to the title bar after rolling up); in between, only the fence
+    /// panel inside it grows or shrinks, anchored at the title bar, so the animation stays smooth.
+    /// </param>
+    void ApplyRollState(bool animate = false)
+    {
+        bool collapsed = Collapsed;
+        int version = ++_rollVersion;
+        // With the title bar at the bottom the fence rolls up (and unrolls) towards its bottom edge.
+        double top = collapsed && _titleBottom ? Config.Top + ExpandedHeight - CollapsedHeight : Config.Top;
+        double height = collapsed ? CollapsedHeight : ExpandedHeight;
+        double from = Root.ActualHeight;
+        int ms = Math.Clamp(_mgr.Config.Settings.RollAnimationMs, 0, 2000);
+
+        if (!animate || ms == 0 || _hwnd == IntPtr.Zero || !IsVisible || from <= 0 || Math.Abs(from - height) < 2)
+        {
+            Root.BeginAnimation(HeightProperty, null);
+            Root.Height = double.NaN;
+            Root.VerticalAlignment = VerticalAlignment.Stretch;
+            ShowCollapsed(collapsed);
+            SetVerticalBounds(top, height);
+            UpdateResizeability();
+            return;
+        }
+
+        Root.VerticalAlignment = _titleBottom ? VerticalAlignment.Bottom : VerticalAlignment.Top;
+        if (!collapsed)
+        {
+            // Unrolling: make room first (the panel keeps its current height), then grow into it.
+            Root.Height = from;
+            ShowCollapsed(false);
+            SetVerticalBounds(top, height);
+        }
+        var anim = new DoubleAnimation(from, height, TimeSpan.FromMilliseconds(ms * Math.Abs(height - from) / Math.Max(1, ExpandedHeight - CollapsedHeight)))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut },
+        };
+        anim.Completed += (_, _) =>
+        {
+            if (version != _rollVersion) return; // interrupted by a newer roll
+            if (collapsed) ApplyRollState(); // shrink the window to the title bar
+            else
+            {
+                Root.BeginAnimation(HeightProperty, null);
+                Root.Height = double.NaN;
+                Root.VerticalAlignment = VerticalAlignment.Stretch;
+            }
+        };
+        Root.BeginAnimation(HeightProperty, anim);
+        UpdateResizeability();
+    }
+
+    void ShowCollapsed(bool collapsed)
+    {
+        _shownCollapsed = collapsed;
         ItemsList.Visibility = collapsed ? Visibility.Collapsed : Visibility.Visible;
         UpdateEmptyHint();
-        TitleBar.CornerRadius = collapsed ? new CornerRadius(7) : new CornerRadius(7, 7, 0, 0);
-        Height = collapsed ? CollapsedHeight : Math.Max(Config.Height, 80);
-        UpdateResizeability();
+        ApplyTitleLayout();
+    }
+
+    /// <summary>Moves and resizes vertically in one step (no flicker when the bottom edge stays put).</summary>
+    void SetVerticalBounds(double top, double height)
+    {
+        _layingOut = true;
+        try
+        {
+            if (_hwnd != IntPtr.Zero && Native.GetWindowRect(_hwnd, out var r))
+            {
+                double dpi = Dpi;
+                int newTop = r.Top + (int)Math.Round((top - Top) * dpi);
+                int newHeight = (int)Math.Round(height * dpi);
+                if (newTop != r.Top || newHeight != r.Height)
+                    Native.SetWindowPos(_hwnd, IntPtr.Zero, r.Left, newTop, r.Width, newHeight,
+                        Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER);
+            }
+            else
+            {
+                Top = top;
+                Height = height;
+            }
+        }
+        finally { _layingOut = false; }
+    }
+
+    void ApplyTitleLayout()
+    {
+        bool b = _titleBottom, collapsed = _shownCollapsed;
+        double r = _mgr.Config.Settings.RoundedCorners ? 7 : 0;
+        // "Never": no title bar at all. "On hover": the bar floats over the icons instead of taking up room.
+        var mode = TitleMode;
+        bool floating = mode == TitleBarMode.OnHover && !collapsed;
+        double titleRow = mode == TitleBarMode.Never || floating ? 0 : TitleHeight;
+        TitleBar.Visibility = mode == TitleBarMode.Never ? Visibility.Collapsed : Visibility.Visible;
+        TitleBar.Height = floating ? TitleHeight : double.NaN;
+        TitleBar.VerticalAlignment = !floating ? VerticalAlignment.Stretch : b ? VerticalAlignment.Bottom : VerticalAlignment.Top;
+        Grid.SetRowSpan(TitleBar, floating ? 2 : 1);
+        Panel.SetZIndex(TitleBar, 1);
+        LayoutGrid.RowDefinitions[0].Height = b ? new GridLength(1, GridUnitType.Star) : new GridLength(titleRow);
+        LayoutGrid.RowDefinitions[1].Height = b ? new GridLength(titleRow) : new GridLength(1, GridUnitType.Star);
+        Grid.SetRow(TitleBar, floating ? 0 : b ? 1 : 0);
+        Grid.SetRow(ItemsList, b ? 0 : 1);
+        Grid.SetRow(EmptyHint, b ? 0 : 1);
+        ItemsList.Padding = b ? new Thickness(4, 4, 4, 2) : new Thickness(4, 2, 4, 4);
+        TitleBar.CornerRadius = collapsed ? new CornerRadius(r) : b ? new CornerRadius(0, 0, r, r) : new CornerRadius(r, r, 0, 0);
+        Root.CornerRadius = new CornerRadius(r > 0 ? 8 : 0);
+    }
+
+    /// <summary>
+    /// Works out whether the title bar belongs at the top or bottom (Auto: bottom when the fence is in
+    /// the lower half of its screen). Called when a move/resize ends, not during, so the bar never
+    /// jumps out from under the mouse.
+    /// </summary>
+    public void UpdateTitlePosition()
+    {
+        bool bottom = Config.TitlePosition switch
+        {
+            TitlePosition.Top => false,
+            TitlePosition.Bottom => true,
+            _ => IsInLowerHalf(),
+        };
+        Config.TitleAtBottom = bottom;
+        if (bottom != _titleBottom)
+        {
+            // A rolled-up fence keeps its title bar where it is; only the direction it unrolls in changes.
+            if (Collapsed) Config.Top = bottom ? Top - (ExpandedHeight - CollapsedHeight) : Top;
+            _titleBottom = bottom;
+            ApplyRollState();
+            _mgr.Store.SaveSoon();
+        }
+        KeepOnScreen();
+    }
+
+    /// <summary>Pixel rectangle the fence covers when unrolled (a rolled-up fence unrolls away from its title bar).</summary>
+    Native.RECT ExpandedRectPx(Native.RECT r)
+    {
+        if (!Collapsed) return r;
+        int h = (int)Math.Round(ExpandedHeight * Dpi);
+        if (_titleBottom) r.Top = r.Bottom - h;
+        else r.Bottom = r.Top + h;
+        return r;
+    }
+
+    /// <summary>Shifts <paramref name="r"/> (keeping its size) so it lies inside <paramref name="wa"/>.</summary>
+    static Native.RECT ClampInto(Native.RECT r, Native.RECT wa)
+    {
+        int dx = 0, dy = 0;
+        if (r.Right > wa.Right) dx = wa.Right - r.Right;
+        if (r.Left + dx < wa.Left) dx = wa.Left - r.Left;
+        if (r.Bottom > wa.Bottom) dy = wa.Bottom - r.Bottom;
+        if (r.Top + dy < wa.Top) dy = wa.Top - r.Top;
+        r.Left += dx; r.Right += dx; r.Top += dy; r.Bottom += dy;
+        return r;
+    }
+
+    /// <summary>
+    /// Pulls the fence fully onto the nearest screen (shrinking it if it's bigger than the screen).
+    /// Runs at startup, after moves/resizes, and when monitors are added, removed or rearranged.
+    /// </summary>
+    public void KeepOnScreen()
+    {
+        if (_hwnd == IntPtr.Zero || !Native.GetWindowRect(_hwnd, out var r)) return;
+        var full = ExpandedRectPx(r);
+        var wa = Native.WorkAreaFor(full);
+        double dpi = Dpi;
+        if (full.Width > wa.Width || full.Height > wa.Height)
+        {
+            if (full.Width > wa.Width) Config.Width = Math.Max(MinWidth, wa.Width / dpi);
+            if (full.Height > wa.Height) Config.Height = Math.Max(80, wa.Height / dpi);
+            _layingOut = true;
+            try { Width = Config.Width; }
+            finally { _layingOut = false; }
+            ApplyRollState();
+            if (!Native.GetWindowRect(_hwnd, out r)) return;
+            full = ExpandedRectPx(r);
+            _mgr.Store.SaveSoon();
+        }
+        MoveBy(ClampInto(full, wa), full, r);
+    }
+
+    /// <summary>Moves the window so its unrolled rectangle goes from <paramref name="from"/> to <paramref name="to"/>.</summary>
+    void MoveBy(Native.RECT to, Native.RECT from, Native.RECT window)
+    {
+        int dx = to.Left - from.Left, dy = to.Top - from.Top;
+        if (dx == 0 && dy == 0) return;
+        Native.SetWindowPos(_hwnd, IntPtr.Zero, window.Left + dx, window.Top + dy, 0, 0,
+            Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER);
+    }
+
+    /// <summary>
+    /// Puts the fence in the middle of a screen: the one it's on, or <paramref name="workArea"/> if given.
+    /// <paramref name="offset"/> (pixels) staggers several fences so they don't sit exactly on top of each other.
+    /// </summary>
+    /// <summary>Keeps the fence's relative place when moving it from one screen's work area to another's.</summary>
+    internal void MoveBetweenScreens(Native.RECT from, Native.RECT to)
+    {
+        if (_hwnd == IntPtr.Zero || !Native.GetWindowRect(_hwnd, out var r)) return;
+        var full = ExpandedRectPx(r);
+        double fx = from.Width > full.Width ? (full.Left - from.Left) / (double)(from.Width - full.Width) : 0;
+        double fy = from.Height > full.Height ? (full.Top - from.Top) / (double)(from.Height - full.Height) : 0;
+        var dest = full;
+        dest.Left = to.Left + (int)Math.Round(Math.Clamp(fx, 0, 1) * Math.Max(0, to.Width - full.Width));
+        dest.Top = to.Top + (int)Math.Round(Math.Clamp(fy, 0, 1) * Math.Max(0, to.Height - full.Height));
+        MoveBy(dest, full, r);
+        UpdateTitlePosition();
+    }
+
+    /// <summary>Is the screen point on this fence's title bar (used to drop one fence onto another to make tabs)?</summary>
+    internal bool TitleBarContains(Native.POINT p)
+    {
+        if (_hwnd == IntPtr.Zero || !TitleBar.IsVisible || !Native.GetWindowRect(_hwnd, out var r)) return false;
+        int h = (int)Math.Round((TitleHeight + 6) * Dpi);
+        int top = _titleBottom ? r.Bottom - h : r.Top, bottom = _titleBottom ? r.Bottom : r.Top + h;
+        return p.X >= r.Left && p.X < r.Right && p.Y >= top && p.Y < bottom;
+    }
+
+    internal void MoveToCentre(Native.RECT? workArea = null, int offset = 0)
+    {
+        if (_hwnd == IntPtr.Zero || !Native.GetWindowRect(_hwnd, out var r)) return;
+        var full = ExpandedRectPx(r);
+        var wa = workArea ?? Native.WorkAreaFor(full);
+        var to = full;
+        to.Left = wa.Left + (wa.Width - full.Width) / 2 + offset;
+        to.Top = wa.Top + (wa.Height - full.Height) / 2 + offset;
+        to.Right = to.Left + full.Width;
+        to.Bottom = to.Top + full.Height;
+        MoveBy(to, full, r);
+        UpdateTitlePosition(); // also re-checks that it fits on the screen
+    }
+
+    bool IsInLowerHalf()
+    {
+        if (_hwnd == IntPtr.Zero || !Native.GetWindowRect(_hwnd, out var r)) return _titleBottom;
+        var wa = Native.WorkAreaFor(r);
+        return r.Top + r.Bottom > wa.Top + wa.Bottom;
+    }
+
+    public FenceLayout CaptureLayout() => new()
+    {
+        Id = Config.Id, Left = Config.Left, Top = Config.Top, Width = Config.Width, Height = Config.Height, RolledUp = Config.RolledUp,
+    };
+
+    public void ApplyLayout(FenceLayout l)
+    {
+        Config.Left = l.Left;
+        Config.Top = l.Top;
+        Config.Width = Math.Max(l.Width, MinWidth);
+        Config.Height = l.Height;
+        _hoverExpanded = false;
+        EnsureOnScreen();
+        _layingOut = true;
+        try { Left = Config.Left; Width = Config.Width; }
+        finally { _layingOut = false; }
+        // Decide the title edge from the full (unrolled) fence, then roll up towards that edge.
+        Config.RolledUp = false;
+        ApplyRollState();
+        UpdateTitlePosition();
+        Config.RolledUp = l.RolledUp;
+        ApplyRollState();
+        _mgr.Store.SaveSoon();
     }
 
     void Expand()
@@ -264,7 +682,7 @@ public partial class FenceWindow : Window
         if (Config.RolledUp && !_hoverExpanded)
         {
             _hoverExpanded = true;
-            ApplyRollState();
+            ApplyRollState(animate: true);
         }
     }
 
@@ -278,7 +696,7 @@ public partial class FenceWindow : Window
         if (!_hoverExpanded) return;
         if (IsMouseOver || _menuOpen || _dragging || _moving || TitleEdit.IsVisible) { ScheduleCollapse(); return; }
         _hoverExpanded = false;
-        ApplyRollState();
+        ApplyRollState(animate: true);
     }
 
     // ------------------------------------------------------------------ items
@@ -291,23 +709,71 @@ public partial class FenceWindow : Window
         var items = paths.Select(p => new FenceItem(p, ShellInfo.GetDisplayName(p), !ShellInfo.Exists(p))).ToList();
         items = Sort(items).ToList();
 
+        // Remember where each icon was, so icons that move can glide to their new place.
+        var oldPositions = _mgr.Config.Settings.AnimateIconMoves && IsVisible ? IconPositions() : null;
+
         Items.Clear();
         int px = Math.Max(32, (int)Math.Round(_mgr.Config.Settings.IconSize * Dpi));
         foreach (var item in items)
         {
             Items.Add(item);
             if (ShellInfo.TryGetCachedIcon(item.Path, px, out var icon))
-                item.Icon = icon;
+                SetIcon(item, icon);
             else
-                Dispatcher.InvokeAsync(() => item.Icon = ShellInfo.GetIcon(item.Path, px), DispatcherPriority.Background);
+                Dispatcher.InvokeAsync(() => SetIcon(item, ShellInfo.GetIcon(item.Path, px)), DispatcherPriority.Background);
             if (selected.Contains(item.Path)) ItemsList.SelectedItems.Add(item);
         }
         UpdateEmptyHint();
+
+        if (oldPositions is { Count: > 0 })
+            Dispatcher.InvokeAsync(() => AnimateIconMoves(oldPositions), DispatcherPriority.Loaded);
+    }
+
+    /// <summary>Applies icon tint and prepares the grey "blend" version.</summary>
+    void SetIcon(FenceItem item, ImageSource? raw)
+    {
+        var s = _mgr.Config.Settings;
+        if (s.BlendWithWallpaper) item.MutedIcon = ImageFx.Greyscale(raw);
+        if (s.TintIcons && raw != null)
+        {
+            var tint = s.TintSource == IconTintSource.FenceColor ? ParseColor(Config.TintColor) : ParseColor(s.IconTintColor);
+            // A near-black fence colour would make icons black: lift it so the tint stays visible.
+            var (h, sat, v) = ImageFx.ToHsv(tint);
+            item.Icon = ImageFx.Tint(raw, ImageFx.FromHsv(h, sat, Math.Max(v, 0.55)));
+        }
+        else item.Icon = raw;
+    }
+
+    Dictionary<string, Point> IconPositions()
+    {
+        var map = new Dictionary<string, Point>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in Items)
+            if (ItemsList.ItemContainerGenerator.ContainerFromItem(item) is ListBoxItem c && c.IsVisible)
+                map[item.Path] = c.TranslatePoint(new Point(0, 0), ItemsList);
+        return map;
+    }
+
+    void AnimateIconMoves(Dictionary<string, Point> oldPositions)
+    {
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        foreach (var item in Items)
+        {
+            if (!oldPositions.TryGetValue(item.Path, out var from)) continue;
+            if (ItemsList.ItemContainerGenerator.ContainerFromItem(item) is not ListBoxItem c || !c.IsVisible) continue;
+            var to = c.TranslatePoint(new Point(0, 0), ItemsList);
+            double dx = from.X - to.X, dy = from.Y - to.Y;
+            if (Math.Abs(dx) < 1 && Math.Abs(dy) < 1) continue;
+            var t = new TranslateTransform(dx, dy);
+            c.RenderTransform = t;
+            var d = TimeSpan.FromMilliseconds(260);
+            t.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(dx, 0, d) { EasingFunction = ease });
+            t.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(dy, 0, d) { EasingFunction = ease });
+        }
     }
 
     void UpdateEmptyHint()
     {
-        bool collapsed = Config.RolledUp && !_hoverExpanded;
+        bool collapsed = _shownCollapsed;
         if (Config.Kind == FenceKind.Portal && !Directory.Exists(Config.PortalPath ?? ""))
             EmptyHint.Text = "Folder not found.\nRight-click → Customize… to pick another.";
         else
@@ -421,10 +887,16 @@ public partial class FenceWindow : Window
             if (e.OriginalSource is DependencyObject d && FindAncestor<System.Windows.Controls.Primitives.ScrollBar>(d) != null) return;
             ItemsList.UnselectAll();
             ItemsList.Focus();
+            // No title bar to grab: drag the fence by its empty space instead.
+            if (TitleMode == TitleBarMode.Never && !Config.Locked)
+            {
+                BeginMove(ItemsList);
+                e.Handled = true;
+            }
             return;
         }
 
-        if (e.ClickCount == 2 && _dragCandidate != null)
+        if (e.ClickCount == 2 && _dragCandidate != null && !_mgr.Config.Settings.SingleClickToOpen)
         {
             ShellActions.Open(_dragCandidate.Path);
             _dragCandidate = null;
@@ -443,6 +915,14 @@ public partial class FenceWindow : Window
 
     void Items_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
+        if (_mgr.Config.Settings.SingleClickToOpen && _dragCandidate != null && !_dragging &&
+            Keyboard.Modifiers == ModifierKeys.None && ContainerAt(e.OriginalSource)?.DataContext == _dragCandidate)
+        {
+            ShellActions.Open(_dragCandidate.Path);
+            _deferredSelect = null;
+            _dragCandidate = null;
+            return;
+        }
         if (_deferredSelect != null && !_dragging)
         {
             ItemsList.SelectedItems.Clear();
@@ -736,6 +1216,7 @@ public partial class FenceWindow : Window
     void OnDragOver(object sender, DragEventArgs e)
     {
         Expand();
+        if (!_dragOver) { _dragOver = true; UpdateIdleFade(); }
         e.Effects = ComputeEffect(e);
         SetDropHighlight(e.Effects != DragDropEffects.None);
         e.Handled = true;
@@ -743,6 +1224,7 @@ public partial class FenceWindow : Window
 
     void OnDrop(object sender, DragEventArgs e)
     {
+        _dragOver = false;
         SetDropHighlight(false);
         var effect = ComputeEffect(e);
         e.Handled = true;
@@ -804,10 +1286,18 @@ public partial class FenceWindow : Window
             return;
         }
         if (Config.Locked) return;
+        BeginMove(TitleBar);
+        e.Handled = true;
+    }
+
+    UIElement? _moveHandle;
+
+    void BeginMove(UIElement handle)
+    {
         Native.GetCursorPos(out _moveStartCursor);
         Native.GetWindowRect(_hwnd, out _moveStartRect);
-        _moving = TitleBar.CaptureMouse();
-        e.Handled = true;
+        _moveHandle = handle;
+        _moving = handle.CaptureMouse();
     }
 
     void TitleBar_MouseMove(object sender, MouseEventArgs e)
@@ -819,6 +1309,11 @@ public partial class FenceWindow : Window
         r.Left += dx; r.Right += dx; r.Top += dy; r.Bottom += dy;
         if (_mgr.Config.Settings.SnapToEdges && (Keyboard.Modifiers & ModifierKeys.Alt) == 0)
             r = _mgr.Snap(this, r, 0);
+        // Keep the whole fence (as it is when unrolled) on the screen the mouse is on.
+        var full = ExpandedRectPx(r);
+        var fit = ClampInto(full, Native.WorkAreaFor(new Native.RECT { Left = p.X, Top = p.Y, Right = p.X + 1, Bottom = p.Y + 1 }));
+        r.Left += fit.Left - full.Left;
+        r.Top += fit.Top - full.Top;
         Native.SetWindowPos(_hwnd, IntPtr.Zero, r.Left, r.Top, 0, 0,
             Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
     }
@@ -827,16 +1322,31 @@ public partial class FenceWindow : Window
     {
         if (!_moving) return;
         _moving = false;
-        TitleBar.ReleaseMouseCapture();
+        _moveHandle?.ReleaseMouseCapture();
+        EndMove();
     }
 
-    void TitleBar_LostMouseCapture(object sender, MouseEventArgs e) => _moving = false;
+    void TitleBar_LostMouseCapture(object sender, MouseEventArgs e)
+    {
+        if (!_moving) return;
+        _moving = false;
+        EndMove();
+    }
+
+    void EndMove()
+    {
+        // Dropped onto another fence's title bar: offer to combine them into tabs.
+        if (_mgr.TryMergeOnDrop(this)) return;
+        UpdateTitlePosition();
+        UpdateIdleFade();
+    }
 
     public void BeginRename()
     {
         Expand();
         TitleEdit.Text = Config.Title;
         TitleText.Visibility = Visibility.Hidden;
+        TabStrip.Visibility = Visibility.Hidden;
         TitleEdit.Visibility = Visibility.Visible;
         Activate();
         TitleEdit.Focus();
@@ -847,7 +1357,6 @@ public partial class FenceWindow : Window
     {
         if (TitleEdit.Visibility != Visibility.Visible) return;
         TitleEdit.Visibility = Visibility.Collapsed;
-        TitleText.Visibility = Visibility.Visible;
         if (commit)
         {
             var t = TitleEdit.Text.Trim();
@@ -858,7 +1367,144 @@ public partial class FenceWindow : Window
                 _mgr.Store.SaveSoon();
             }
         }
+        _mgr.RefreshTabs(this); // restores the title / tab strip
         ScheduleCollapse();
+    }
+
+    // ------------------------------------------------------------------ tabs
+
+    /// <summary>Draws the tab strip when this fence is part of a tab group (or the plain title otherwise).</summary>
+    public void RebuildTabs()
+    {
+        var members = _mgr.GroupMembers(this);
+        var style = _mgr.Config.Settings.TabStyle;
+        bool grouped = members.Count > 1;
+        TabStrip.Children.Clear();
+        TabMenuButton.Visibility = grouped && style == TabStyle.MenuOnly ? Visibility.Visible : Visibility.Collapsed;
+        if (TitleEdit.IsVisible) return;
+        if (!grouped || style == TabStyle.MenuOnly)
+        {
+            TabStrip.Visibility = Visibility.Collapsed;
+            TitleText.Visibility = Visibility.Visible;
+            TitleText.Margin = grouped ? new Thickness(12, 0, 28, 0) : new Thickness(12, 0, 12, 0);
+            return;
+        }
+        TitleText.Visibility = Visibility.Hidden;
+        TabStrip.Visibility = Visibility.Visible;
+
+        var fg = TitleText.Foreground;
+        bool dark = fg == DarkTextBrush;
+        Color hi = dark ? Color.FromArgb(0x30, 0, 0, 0) : Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF);
+        for (int i = 0; i < members.Count; i++)
+        {
+            var m = members[i];
+            bool active = m == this;
+            var text = new TextBlock
+            {
+                Text = m.Config.Title,
+                Foreground = fg,
+                FontSize = 12.5,
+                FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal,
+                Opacity = active ? 1 : 0.75,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Effect = TitleText.Effect,
+            };
+            var tab = new Border { Child = text, Padding = new Thickness(8, 0, 8, 0), Background = Brushes.Transparent, Cursor = Cursors.Hand, ToolTip = m.Config.Title };
+            switch (style)
+            {
+                case TabStyle.Segmented:
+                    tab.Background = new SolidColorBrush(active ? hi : Color.FromArgb(0x14, hi.R, hi.G, hi.B));
+                    tab.Margin = new Thickness(i == 0 ? 0 : 1, 0, 0, 0);
+                    tab.CornerRadius = new CornerRadius(i == 0 ? 4 : 0, i == members.Count - 1 ? 4 : 0, i == members.Count - 1 ? 4 : 0, i == 0 ? 4 : 0);
+                    break;
+                case TabStyle.Flat:
+                    tab.BorderBrush = fg;
+                    tab.BorderThickness = new Thickness(0, 0, 0, active ? 2 : 0);
+                    break;
+                case TabStyle.Rounded:
+                    if (active) tab.Background = new SolidColorBrush(hi);
+                    tab.CornerRadius = new CornerRadius(10);
+                    tab.Margin = new Thickness(2, 0, 2, 0);
+                    break;
+            }
+            if (!active)
+            {
+                tab.MouseLeftButtonDown += (_, e) =>
+                {
+                    e.Handled = true;
+                    if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) _mgr.DetachTab(m);
+                    else _mgr.SwitchTab(this, m);
+                };
+                tab.MouseEnter += (_, _) =>
+                {
+                    if (!_mgr.Config.Settings.SwitchTabsOnHover) return;
+                    var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+                    t.Tick += (_, _) => { t.Stop(); if (tab.IsMouseOver && IsVisible) _mgr.SwitchTab(this, m); };
+                    t.Start();
+                };
+            }
+            else
+            {
+                tab.MouseLeftButtonDown += (_, e) =>
+                {
+                    if ((Keyboard.Modifiers & ModifierKeys.Shift) == 0) return; // normal clicks move / roll up the fence
+                    e.Handled = true;
+                    _mgr.DetachTab(this);
+                };
+            }
+            TabStrip.Children.Add(tab);
+        }
+    }
+
+    void TabMenuButton_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        var menu = new ContextMenu { PlacementTarget = TabMenuButton };
+        foreach (var m in _mgr.GroupMembers(this))
+        {
+            var mi = new MenuItem { Header = m.Config.Title, IsChecked = m == this };
+            var target = m;
+            mi.Click += (_, _) => { if (target != this) _mgr.SwitchTab(this, target); };
+            menu.Items.Add(mi);
+        }
+        _menuOpen = true;
+        menu.Closed += (_, _) => { _menuOpen = false; ScheduleCollapse(); UpdateIdleFade(); };
+        menu.IsOpen = true;
+    }
+
+    /// <summary>
+    /// Shows this (hidden) tab in place of <paramref name="from"/>: same position, size and roll-up state.
+    /// </summary>
+    public void ShowAsTab(FenceWindow from)
+    {
+        Config.Left = from.Config.Left;
+        Config.Top = from.Config.Top;
+        Config.Width = from.Config.Width;
+        Config.Height = from.Config.Height;
+        Config.RolledUp = from.Config.RolledUp;
+        Config.TitlePosition = from.Config.TitlePosition;
+        Config.TitleAtBottom = from.Config.TitleAtBottom;
+        Config.Locked = from.Config.Locked;
+        _titleBottom = from._titleBottom;
+        _hoverExpanded = from._hoverExpanded;
+        _layingOut = true;
+        try { Left = Config.Left; Width = Config.Width; }
+        finally { _layingOut = false; }
+        ApplyRollState();
+        if (!IsVisible)
+        {
+            BeginAnimation(OpacityProperty, null);
+            Opacity = 1;
+            Show();
+        }
+        // Line up exactly with the old tab (DIP rounding can differ by a pixel).
+        if (_hwnd != IntPtr.Zero && from.Handle != IntPtr.Zero && Native.GetWindowRect(from.Handle, out var r))
+            Native.SetWindowPos(_hwnd, IntPtr.Zero, r.Left, r.Top, r.Width, r.Height, Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+        _mgr.PlaceInZOrder(this);
+        ApplyAppearance();
+        if (_hoverExpanded) ScheduleCollapse();
     }
 
     void TitleEdit_KeyDown(object sender, KeyEventArgs e)
@@ -895,8 +1541,20 @@ public partial class FenceWindow : Window
         Add(_menu, "New fence", () => _mgr.CreateFence("New Fence", Left + 30, Top + 30, startRename: true));
         Add(_menu, "New folder portal…", () => _mgr.CreatePortalInteractive(Left + 30, Top + 30));
         _menu.Items.Add(new Separator());
-        Add(_menu, "Rename fence", BeginRename);
-        Add(_menu, Config.RolledUp ? "Unroll (keep open)" : "Roll up", ToggleRollUp);
+        bool grouped = Config.GroupId != null;
+        Add(_menu, grouped ? "Rename tab" : "Rename fence", BeginRename);
+        if (TitleMode != TitleBarMode.Never)
+            Add(_menu, Config.RolledUp ? "Unroll (keep open)" : "Roll up", ToggleRollUp);
+        if (grouped)
+        {
+            var tabs = new MenuItem { Header = "Tab" };
+            var members = _mgr.GroupMembers(this);
+            int idx = members.IndexOf(this);
+            Add(tabs, "Move tab left", () => _mgr.MoveTab(this, -1), enabled: idx > 0);
+            Add(tabs, "Move tab right", () => _mgr.MoveTab(this, +1), enabled: idx < members.Count - 1);
+            Add(tabs, "Detach into its own fence", () => _mgr.DetachTab(this));
+            _menu.Items.Add(tabs);
+        }
 
         var sort = new MenuItem { Header = "Sort by" };
         if (Config.Kind == FenceKind.Standard)
@@ -906,12 +1564,15 @@ public partial class FenceWindow : Window
         Add(sort, "Date modified", () => SetSort(SortMode.DateModified), Config.Sort == SortMode.DateModified);
         _menu.Items.Add(sort);
 
-        Add(_menu, "Lock position and size", () =>
-        {
-            Config.Locked = !Config.Locked;
-            UpdateResizeability();
-            _mgr.Store.SaveSoon();
-        }, Config.Locked);
+        var title = new MenuItem { Header = "Title bar" };
+        void SetTitlePos(TitlePosition p) { Config.TitlePosition = p; UpdateTitlePosition(); _mgr.Store.SaveSoon(); }
+        Add(title, "Automatic (bottom when low on the screen)", () => SetTitlePos(TitlePosition.Auto), Config.TitlePosition == TitlePosition.Auto);
+        Add(title, "Top", () => SetTitlePos(TitlePosition.Top), Config.TitlePosition == TitlePosition.Top);
+        Add(title, "Bottom", () => SetTitlePos(TitlePosition.Bottom), Config.TitlePosition == TitlePosition.Bottom);
+        _menu.Items.Add(title);
+
+        Add(_menu, "Lock position and size", () => SetLocked(!Config.Locked), Config.Locked);
+        Add(_menu, "Move to centre of screen", () => MoveToCentre());
         Add(_menu, "Customize…", () => new FenceSettingsWindow(_mgr, this).ShowDialog());
 
         if (Config.Kind == FenceKind.Portal && !string.IsNullOrEmpty(Config.PortalPath))

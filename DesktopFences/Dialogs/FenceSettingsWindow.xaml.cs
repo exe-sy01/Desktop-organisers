@@ -22,6 +22,8 @@ public partial class FenceSettingsWindow : Window
     readonly FenceWindow _fence;
     readonly string _origTitle, _origColor;
     readonly double _origOpacity;
+    readonly TextColorMode _origText;
+    readonly TitlePosition _origTitlePos;
     readonly bool _ready;
     bool _saved;
 
@@ -33,6 +35,8 @@ public partial class FenceSettingsWindow : Window
         _origTitle = c.Title;
         _origColor = c.TintColor;
         _origOpacity = c.Opacity;
+        _origText = c.TextColor;
+        _origTitlePos = c.TitlePosition;
 
         InitializeComponent();
 
@@ -52,6 +56,8 @@ public partial class FenceSettingsWindow : Window
         HexBox.Text = c.TintColor;
         OpacitySlider.Value = Math.Round(c.Opacity * 100);
         OpacityLabel.Text = $"({OpacitySlider.Value:0}%)";
+        TextColorBox.SelectedItem = TextColorBox.Items.Cast<ComboBoxItem>().First(i => (string)i.Tag == c.TextColor.ToString());
+        TitlePosBox.SelectedItem = TitlePosBox.Items.Cast<ComboBoxItem>().First(i => (string)i.Tag == c.TitlePosition.ToString());
         RulesBox.Text = string.Join(", ", c.AutoCaptureExtensions);
         FoldersCheck.IsChecked = c.CaptureFolders;
         PortalBox.Text = c.PortalPath ?? "";
@@ -71,7 +77,13 @@ public partial class FenceSettingsWindow : Window
         if (!string.IsNullOrWhiteSpace(TitleBox.Text)) c.Title = TitleBox.Text.Trim();
         if (IsValidColor(HexBox.Text)) c.TintColor = HexBox.Text.Trim();
         c.Opacity = OpacitySlider.Value / 100.0;
+        if (TextColorBox.SelectedItem is ComboBoxItem tc) c.TextColor = Enum.Parse<TextColorMode>((string)tc.Tag);
         _fence.ApplyAppearance(); // live preview
+        if (TitlePosBox.SelectedItem is ComboBoxItem tp)
+        {
+            var pos = Enum.Parse<TitlePosition>((string)tp.Tag);
+            if (pos != c.TitlePosition) { c.TitlePosition = pos; _fence.UpdateTitlePosition(); }
+        }
     }
 
     static bool IsValidColor(string s)
@@ -86,7 +98,9 @@ public partial class FenceSettingsWindow : Window
         c.Title = _origTitle;
         c.TintColor = _origColor;
         c.Opacity = _origOpacity;
+        c.TextColor = _origText;
         _fence.ApplyAppearance();
+        if (c.TitlePosition != _origTitlePos) { c.TitlePosition = _origTitlePos; _fence.UpdateTitlePosition(); }
     }
 
     void Browse_Click(object sender, RoutedEventArgs e)
